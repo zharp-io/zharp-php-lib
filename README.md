@@ -181,15 +181,17 @@ include the Monolog handler test.
 
 Packagist publishes from the GitHub tags of
 [github.com/zharp-io/zharp-php-lib](https://github.com/zharp-io/zharp-php-lib), and updates by
-itself through the GitHub hook it installs.
+itself through a webhook on the repository.
 
 1. Update `VERSION` in `src/Zharp.php` and `CHANGELOG.md`; run `php tests/run.php`.
 2. Commit, then tag and push: `git tag v0.1.1 && git push origin main v0.1.1`.
 3. It's on [packagist.org/packages/zharp/logs](https://packagist.org/packages/zharp/logs) within a
    minute.
 
-First time only: sign in at [packagist.org](https://packagist.org) with GitHub, **Submit** the
-repository URL, and allow the GitHub hook so new tags appear automatically.
+The webhook (already set up; for reference if it's ever lost): in the repository's **Settings →
+Webhooks → Add webhook**, Payload URL `https://packagist.org/api/github?username=<packagist user>`,
+content type `application/json`, the Packagist API token (Profile → Show API Token) as the secret,
+and *Just the push event*. Without it, a new tag only appears after **Update** on the package page.
 
 ## License
 
