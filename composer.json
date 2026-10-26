@@ -1,0 +1,39 @@
+{
+    "name": "zharp/logs",
+    "description": "Send your PHP and Laravel app's logs and exceptions to Zharp. No dependencies.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["logging", "logs", "laravel", "monolog", "observability", "monitoring", "zharp"],
+    "homepage": "https://zharp.io/docs/sdks/php",
+    "authors": [
+        { "name": "Zharp", "email": "support@zharp.io", "homepage": "https://zharp.io" }
+    ],
+    "support": {
+        "docs": "https://zharp.io/docs/sdks/php",
+        "source": "https://github.com/zharp-io/zharp-php-lib",
+        "issues": "https://github.com/zharp-io/zharp-php-lib/issues"
+    },
+    "require": {
+        "php": ">=7.4",
+        "ext-json": "*"
+    },
+    "suggest": {
+        "ext-curl": "Sends logs with curl; without it, PHP's HTTP stream wrapper is used.",
+        "monolog/monolog": "For Zharp\\Logs\\Monolog\\ZharpHandler — Laravel and Symfony use Monolog."
+    },
+    "require-dev": {
+        "monolog/monolog": "^2.0 || ^3.0"
+    },
+    "autoload": {
+        "psr-4": { "Zharp\\Logs\\": "src/" }
+    },
+    "extra": {
+        "laravel": {
+            "providers": ["Zharp\\Logs\\Laravel\\ZharpServiceProvider"]
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable"
+}
