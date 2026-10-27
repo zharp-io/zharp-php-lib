@@ -23,6 +23,12 @@ class Transport
      */
     public const MAX_REQUEST_BYTES = 1000000;
 
+    /**
+     * Seconds sending stops once Zharp refuses the API key (401/403). One body is tried again
+     * after it; while the key is still refused the wait starts over.
+     */
+    public const REJECTED_BACKOFF = 3600;
+
     /** @var string */
     private $apiKey;
     /** @var string */
@@ -54,6 +60,10 @@ class Transport
     {
         $delivered = true;
         foreach (self::splitBySize($entries, self::MAX_REQUEST_BYTES) as $body) {
+            // While the key is refused, entries are dropped: nothing queues up.
+            if ($this->backedOff()) {
+                return true;
+            }
             if (!$this->sendBody($body, $deadline)) {
                 $delivered = false;
             }
@@ -74,7 +84,16 @@ class Transport
                 return false;
             }
             $status = $this->post($body, min(10.0, $left));
+            if ($status === 401 || $status === 403) {
+                $this->refused($status);
+
+                return true;
+            }
             if ($status > 0 && $status < 500) {
+                if ($status < 300) {
+                    $this->accepted();
+                }
+
                 return true;
             }
             $wait = $this->retryDelay * (2 << $attempt);
@@ -84,6 +103,55 @@ class Transport
         }
 
         return false;
+    }
+
+    /**
+     * Where a refusal is remembered: a file holding the time to try again. PHP keeps nothing
+     * between requests, so without it every request would send to the dead key and warn again.
+     */
+    public function rejectionMarker(): string
+    {
+        return sys_get_temp_dir() . '/zharp-rejected-' . substr(sha1($this->apiKey . '|' . $this->url), 0, 16);
+    }
+
+    /** Whether sending is stopped because Zharp refused the key; once the wait is over, one body goes. */
+    public function backedOff(): bool
+    {
+        $marker = $this->rejectionMarker();
+        if (!is_file($marker)) {
+            return false;
+        }
+
+        return microtime(true) < (float) @file_get_contents($marker);
+    }
+
+    /** Stops sending for REJECTED_BACKOFF; the warning is written once, not on every retry. */
+    private function refused(int $status): void
+    {
+        $marker = $this->rejectionMarker();
+        if (!is_file($marker)) {
+            self::warn("Zharp rejected this API key (HTTP $status) — logs are not being sent. Check ZHARP_API_KEY.");
+        }
+        @file_put_contents($marker, (string) (microtime(true) + self::REJECTED_BACKOFF), LOCK_EX);
+    }
+
+    /** Resumes sending after a refusal, and says so once. */
+    private function accepted(): void
+    {
+        $marker = $this->rejectionMarker();
+        if (is_file($marker) && @unlink($marker)) {
+            self::warn('Zharp accepted the API key again — logs are being sent.');
+        }
+    }
+
+    /** On stderr in a script, in the error log on a web server — where someone will see it. */
+    private static function warn(string $message): void
+    {
+        if (PHP_SAPI === 'cli') {
+            Env::announce($message);
+        } else {
+            error_log('[Zharp] ' . $message);
+        }
     }
 
     /** One POST; the status code, or 0 when it never got one. */

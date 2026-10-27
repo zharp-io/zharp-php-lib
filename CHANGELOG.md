@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.1
+
+- A rejected API key (HTTP 401/403) stops sending for an hour with one warning — across requests, remembered in a temp file — instead of every request sending to a dead key; sending resumes, with a notice, once the key is accepted again.
+
 ## v0.1.0
 
 - First release: `Zharp::init()` and `debug`/`info`/`warn`/`error`/`fatal` (and the PSR-3 names), from options or `ZHARP_*` environment variables.
