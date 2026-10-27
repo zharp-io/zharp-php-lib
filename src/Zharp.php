@@ -20,7 +20,7 @@ use Zharp\Logs\Internal\Transport;
  */
 final class Zharp
 {
-    public const VERSION = '0.1.0';
+    public const VERSION = '0.1.1';
 
     /** What requests from this SDK say they are, in the X-Zharp-SDK header. */
     public const SDK_NAME = 'php-logs/' . self::VERSION;

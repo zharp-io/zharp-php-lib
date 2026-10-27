@@ -279,6 +279,26 @@ test('server errors are retried and refusals are not', static function (): void 
     reset_fake();
 });
 
+test('a refused key stops sending for an hour, then tries again', static function (): void {
+    global $endpoint;
+    $transport = new Transport('refused-key', Transport::normalizeEndpoint($endpoint), 0.001);
+    @unlink($transport->rejectionMarker());
+    reset_fake(401);
+    check($transport->send([['m' => 1]], microtime(true) + 10), '401 should count as done');
+    same(1, count(received()), '401 attempts');
+    // Backed off, in this process and the next request alike: dropped without a request.
+    $transport->send([['m' => 2]], microtime(true) + 10);
+    (new Transport('refused-key', Transport::normalizeEndpoint($endpoint), 0.001))->send([['m' => 3]], microtime(true) + 10);
+    same(1, count(received()), 'sent while backed off');
+    // An hour on (the marker's time passed), one body tries again; accepted, sending resumes.
+    file_put_contents($transport->rejectionMarker(), (string) (microtime(true) - 1));
+    reset_fake();
+    $transport->send([['m' => 4]], microtime(true) + 10);
+    $transport->send([['m' => 5]], microtime(true) + 10);
+    same(2, count(received()), 'after recovery');
+    check(!$transport->backedOff(), 'still backed off');
+});
+
 test('bodies are cut by size, and a large entry goes alone', static function (): void {
     $entries = [['m' => str_repeat('x', 40)], ['m' => str_repeat('x', 40)], ['m' => str_repeat('x', 40)], ['m' => str_repeat('y', 500)]];
     $bodies = Transport::splitBySize($entries, 120);
