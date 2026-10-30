@@ -1,28 +1,22 @@
 <?php
 
-// Every kind of log, then an uncaught exception. Run with your ingest-only key in the environment:
+// Plain PHP: a span, logs, a handled error, then an uncaught exception. Key from the environment:
 //
-//     ZHARP_API_KEY=your-ingest-only-key php examples/basic.php
+//     ZHARP_KEY=zpk_… ZHARP_ENDPOINT=http://localhost:3000/api/v1/otlp php examples/basic.php
 
 require __DIR__ . '/../vendor/autoload.php';
 
-use Zharp\Logs\Zharp;
+use Zharp\Zharp;
 
-Zharp::init(['service' => 'php-sample', 'environment' => 'development', 'app_version' => '1.0.0']);
+Zharp::init(['service' => 'php-example', 'environment' => 'development']);
 
-Zharp::info('Checkout opened', ['cart_items' => 3, 'currency' => 'GHS']);
-Zharp::warn('Slow network detected', ['latency_ms' => 3200]);
+Zharp::startSpan('checkout', static function (): void {
+    Zharp::info('Checkout opened', ['cart_items' => 3]);
+    try {
+        throw new RuntimeException('Card declined');
+    } catch (RuntimeException $e) {
+        Zharp::captureError($e, ['order_id' => 99]);
+    }
+});
 
-try {
-    throw new RuntimeException('Card declined');
-} catch (RuntimeException $e) {
-    Zharp::error('Payment failed', ['order_id' => 99, 'exception' => $e]);
-}
-
-function charge(int $orderId): void
-{
-    throw new LogicException('Sample crash from PHP');
-}
-
-// Uncaught: sent as fatal with its stack, then PHP reports it and the script ends with code 255.
-charge(99);
+throw new LogicException('Uncaught at the top level'); // reported (unhandled), then PHP ends as usual

@@ -1,81 +1,144 @@
 <?php
 
-namespace Zharp\Logs\Laravel;
+declare(strict_types=1);
 
+namespace Zharp\Laravel;
+
+use Illuminate\Contracts\Debug\ExceptionHandler;
+use Illuminate\Contracts\Http\Kernel as HttpKernel;
+use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\ServiceProvider;
-use Zharp\Logs\Monolog\ZharpHandler;
-use Zharp\Logs\Zharp;
+use Throwable;
+use Zharp\Zharp;
 
 /**
- * Zharp for Laravel, found by package discovery — nothing to register.
+ * Zharp for Laravel, found by package discovery — set ZHARP_KEY (and ZHARP_SERVICE,
+ * ZHARP_ENVIRONMENT) in .env and that's all:
  *
- * Starts Zharp from config/zharp.php (or ZHARP_* in .env), and adds a "zharp" log channel. Put it
- * in your log stack and everything Laravel logs goes to Zharp, reported exceptions included, with
- * their stack:
- *
- *     LOG_STACK=single,zharp      # Laravel 11+, in .env
- *
- * Laravel handles uncaught exceptions itself and reports them through the log, so Zharp's own
- * handler stays out of its way here.
+ * - every HTTP request gets a SERVER span (the TraceRequests global middleware);
+ * - exceptions Laravel reports become unhandled Zharp errors, with the request's trace;
+ * - everything Laravel logs (info and up by default) is sent with the trace, user and session;
+ * - telemetry is sent once each response is out, and after every queue job.
  */
 class ZharpServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__ . '/../../config/zharp.php', 'zharp');
-
-        // The channel, unless the app defines its own "zharp" channel in config/logging.php.
-        $config = $this->app['config'];
-        if (!$config->has('logging.channels.zharp')) {
-            $config->set('logging.channels.zharp', [
-                'driver' => 'monolog',
-                'handler' => ZharpHandler::class,
-                'level' => $config->get('zharp.level', 'debug'),
-            ]);
-        }
     }
 
     public function boot(): void
     {
         if ($this->app->runningInConsole()) {
-            $this->publishes([__DIR__ . '/../../config/zharp.php' => config_path('zharp.php')], 'zharp-config');
-            $this->commands([TestCommand::class]);
+            $this->publishes([__DIR__ . '/../../config/zharp.php' => $this->app->configPath('zharp.php')], 'zharp-config');
         }
 
         $config = (array) $this->app['config']->get('zharp', []);
-        Zharp::init([
-            'api_key' => $config['api_key'] ?? null,
+        $started = Zharp::init([
+            'key' => $config['key'] ?? null,
             'service' => $config['service'] ?? null,
             'environment' => $config['environment'] ?? null,
-            'app_version' => $config['app_version'] ?? null,
-            'source' => $config['source'] ?? null,
+            'release' => $config['release'] ?? null,
             'endpoint' => $config['endpoint'] ?? null,
-            // Laravel's own handler reports uncaught exceptions through the log channel.
-            'capture_exceptions' => false,
-            // Not a line on every artisan command; `php artisan zharp:test` says whether it works.
+            'sample_rate' => $config['sample_rate'] ?? null,
+            // Laravel's exception handler reports uncaught exceptions; Zharp listens there.
+            'capture_uncaught' => false,
             'quiet' => true,
         ]);
-        if (!Zharp::isActive()) {
+        if (!$started) {
             return;
         }
 
-        // Send once the response is out — and, in a queue worker or under Octane, after every job
+        if (filter_var($config['trace_requests'] ?? true, FILTER_VALIDATE_BOOL)) {
+            $this->traceRequests();
+        }
+        $this->reportExceptions();
+        $this->bridgeLogs($config['log_level'] ?? 'info');
+        $this->flushAfterWork();
+    }
+
+    private function traceRequests(): void
+    {
+        $add = static function ($kernel): void {
+            if (method_exists($kernel, 'prependMiddleware')) {
+                $kernel->prependMiddleware(TraceRequests::class);
+            }
+        };
+        // Laravel 11+ has resolved the kernel before providers boot; older versions haven't yet.
+        if ($this->app->resolved(HttpKernel::class)) {
+            $add($this->app->make(HttpKernel::class));
+        } else {
+            $this->app->afterResolving(HttpKernel::class, $add);
+        }
+    }
+
+    private function reportExceptions(): void
+    {
+        $register = static function ($handler): void {
+            if (!method_exists($handler, 'reportable')) {
+                return;
+            }
+            // Runs before Laravel logs the exception; that log line keeps its trace but isn't
+            // reported a second time.
+            $handler->reportable(static function (Throwable $e): void {
+                $span = TraceRequests::current();
+                if ($span !== null) {
+                    $span->recordException($e);
+                } else {
+                    Zharp::reportException($e, false);
+                }
+            });
+        };
+        if ($this->app->resolved(ExceptionHandler::class)) {
+            $register($this->app->make(ExceptionHandler::class));
+        } else {
+            $this->app->afterResolving(ExceptionHandler::class, $register);
+        }
+    }
+
+    private function bridgeLogs(mixed $level): void
+    {
+        if ($level === false || in_array(strtolower((string) $level), ['', 'false', 'off', 'none', '0'], true)) {
+            return;
+        }
+        $minimum = Zharp::SEVERITY[strtolower((string) $level)] ?? 9;
+        $this->app['events']->listen(MessageLogged::class, static function (MessageLogged $event) use ($minimum): void {
+            $level = strtolower((string) $event->level);
+            $severity = Zharp::SEVERITY[$level] ?? 9;
+            if ($severity < $minimum) {
+                return;
+            }
+            $context = $event->context;
+            $exception = $context['exception'] ?? null;
+            unset($context['exception']);
+            Zharp::emit(
+                $severity,
+                $level,
+                is_string($event->message) ? $event->message : (string) json_encode($event->message),
+                $context,
+                $exception instanceof Throwable ? $exception : null,
+                true,
+            );
+        });
+    }
+
+    private function flushAfterWork(): void
+    {
+        // After the response is out (PHP-FPM) — and, in queue workers and Octane, after every job
         // and request, since the process doesn't end between them.
         $this->app->terminating(static function (): void {
             Zharp::flush();
         });
-        $events = $this->app['events'];
         $flush = static function (): void {
             Zharp::flush();
         };
         foreach ([
             'Illuminate\Queue\Events\JobProcessed',
             'Illuminate\Queue\Events\JobFailed',
-            'Illuminate\Queue\Events\JobExceptionOccurred',
             'Laravel\Octane\Events\RequestTerminated',
             'Laravel\Octane\Events\TaskTerminated',
         ] as $event) {
-            $events->listen($event, $flush);
+            $this->app['events']->listen($event, $flush);
         }
     }
 }

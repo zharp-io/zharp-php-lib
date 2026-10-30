@@ -1,9 +1,9 @@
 {
-    "name": "zharp/logs",
-    "description": "Send your PHP and Laravel app's logs and exceptions to Zharp. No dependencies.",
+    "name": "zharp/zharp",
+    "description": "Zharp Application Monitoring for PHP, Laravel and Symfony: traces, logs and errors on OpenTelemetry.",
     "type": "library",
     "license": "MIT",
-    "keywords": ["logging", "logs", "laravel", "monolog", "observability", "monitoring", "zharp"],
+    "keywords": ["apm", "tracing", "opentelemetry", "logging", "errors", "laravel", "symfony", "monolog", "observability", "zharp"],
     "homepage": "https://zharp.io/docs/sdks/php",
     "authors": [
         { "name": "Zharp", "email": "support@zharp.io", "homepage": "https://zharp.io" }
@@ -14,26 +14,46 @@
         "issues": "https://github.com/zharp-io/zharp-php-lib/issues"
     },
     "require": {
-        "php": ">=7.4",
-        "ext-json": "*"
-    },
-    "suggest": {
-        "ext-curl": "Sends logs with curl; without it, PHP's HTTP stream wrapper is used.",
-        "monolog/monolog": "For Zharp\\Logs\\Monolog\\ZharpHandler — Laravel and Symfony use Monolog."
+        "php": "^8.2",
+        "ext-json": "*",
+        "open-telemetry/api": "^1.4",
+        "open-telemetry/context": "^1.1",
+        "open-telemetry/sdk": "^1.6",
+        "open-telemetry/exporter-otlp": "^1.3",
+        "guzzlehttp/guzzle": "^7.8",
+        "guzzlehttp/psr7": "^2.6"
     },
     "require-dev": {
-        "monolog/monolog": "^2.0 || ^3.0"
+        "phpunit/phpunit": "^10.5 || ^11.0",
+        "monolog/monolog": "^3.0",
+        "illuminate/http": "^10.0 || ^11.0 || ^12.0",
+        "symfony/http-kernel": "^6.4 || ^7.0"
+    },
+    "suggest": {
+        "ext-opentelemetry": "With open-telemetry/opentelemetry-auto-pdo, -auto-guzzle, -auto-laravel or -auto-symfony: database and outgoing HTTP spans too.",
+        "ext-protobuf": "Faster OTLP encoding than the pure-PHP google/protobuf.",
+        "monolog/monolog": "For Zharp\\Monolog\\ZharpHandler (Laravel and Symfony use Monolog)."
     },
     "autoload": {
-        "psr-4": { "Zharp\\Logs\\": "src/" }
+        "psr-4": { "Zharp\\": "src/" }
+    },
+    "autoload-dev": {
+        "psr-4": { "Zharp\\Tests\\": "tests/" }
     },
     "extra": {
         "laravel": {
-            "providers": ["Zharp\\Logs\\Laravel\\ZharpServiceProvider"]
+            "providers": ["Zharp\\Laravel\\ZharpServiceProvider"]
         }
     },
+    "scripts": {
+        "test": "phpunit"
+    },
     "config": {
-        "sort-packages": true
+        "sort-packages": true,
+        "allow-plugins": {
+            "php-http/discovery": true,
+            "tbachert/spi": true
+        }
     },
     "minimum-stability": "stable"
 }

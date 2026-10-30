@@ -1,563 +1,515 @@
 <?php
 
-namespace Zharp\Logs;
+declare(strict_types=1);
 
-use Zharp\Logs\Internal\Env;
-use Zharp\Logs\Internal\Message;
-use Zharp\Logs\Internal\Transport;
+namespace Zharp;
+
+use OpenTelemetry\API\Baggage\Baggage;
+use OpenTelemetry\API\Baggage\Propagation\BaggagePropagator;
+use OpenTelemetry\API\Globals;
+use OpenTelemetry\API\Instrumentation\Configurator;
+use OpenTelemetry\API\Logs\LoggerInterface;
+use OpenTelemetry\API\Logs\LogRecord;
+use OpenTelemetry\API\Trace\Propagation\TraceContextPropagator;
+use OpenTelemetry\API\Trace\Span;
+use OpenTelemetry\API\Trace\SpanInterface;
+use OpenTelemetry\API\Trace\StatusCode;
+use OpenTelemetry\API\Trace\TracerInterface;
+use OpenTelemetry\Context\Context;
+use OpenTelemetry\Context\ContextInterface;
+use OpenTelemetry\Context\Propagation\MultiTextMapPropagator;
+use OpenTelemetry\Context\Propagation\TextMapPropagatorInterface;
+use OpenTelemetry\Contrib\Otlp\ContentTypes;
+use OpenTelemetry\Contrib\Otlp\LogsExporter;
+use OpenTelemetry\Contrib\Otlp\OtlpHttpTransportFactory;
+use OpenTelemetry\Contrib\Otlp\SpanExporter;
+use OpenTelemetry\SDK\Common\Attribute\Attributes;
+use OpenTelemetry\SDK\Logs\LoggerProvider;
+use OpenTelemetry\SDK\Logs\LoggerProviderInterface;
+use OpenTelemetry\SDK\Logs\LogRecordExporterInterface;
+use OpenTelemetry\SDK\Logs\Processor\BatchLogRecordProcessor;
+use OpenTelemetry\SDK\Logs\Processor\SimpleLogRecordProcessor;
+use OpenTelemetry\SDK\Resource\ResourceInfo;
+use OpenTelemetry\SDK\Resource\ResourceInfoFactory;
+use OpenTelemetry\SDK\Trace\ReadableSpanInterface;
+use OpenTelemetry\SDK\Trace\Sampler\ParentBased;
+use OpenTelemetry\SDK\Trace\Sampler\TraceIdRatioBasedSampler;
+use OpenTelemetry\SDK\Trace\SpanExporterInterface;
+use OpenTelemetry\SDK\Trace\SpanProcessor\BatchSpanProcessor;
+use OpenTelemetry\SDK\Trace\SpanProcessor\SimpleSpanProcessor;
+use OpenTelemetry\SDK\Trace\TracerProvider;
+use Throwable;
+use WeakMap;
+use Zharp\Internal\ContextLogProcessor;
+use Zharp\Internal\ContextSpanProcessor;
+use Zharp\Internal\Exceptions;
+use Zharp\Internal\Values;
 
 /**
- * Sends your PHP app's logs and exceptions to Zharp.
+ * Zharp Application Monitoring for PHP — a thin layer over the official OpenTelemetry SDK.
  *
- * Start it once, as early as possible:
+ *     Zharp::init(['key' => 'zpk_…', 'service' => 'checkout-api', 'environment' => 'production']);
  *
- *     Zharp::init(['api_key' => 'your-ingest-only-key', 'service' => 'checkout-api']);
- *     Zharp::info('User signed in', ['user_id' => 42]);
- *
- * PHP has no background threads, so logs are queued and sent when the request (or script) ends —
- * in PHP-FPM after the response has gone to the browser. A long-running process (a queue worker,
- * a daemon) also sends every few seconds, and at once for error and fatal. Logging never throws.
+ * Laravel and Symfony need no code: set ZHARP_KEY (and ZHARP_SERVICE, ZHARP_ENVIRONMENT) and the
+ * service provider / ZharpBundle starts it and traces every request. Never throws into the app.
  */
 final class Zharp
 {
-    public const VERSION = '0.1.1';
+    public const VERSION = '0.1.0';
 
-    /** What requests from this SDK say they are, in the X-Zharp-SDK header. */
-    public const SDK_NAME = 'php-logs/' . self::VERSION;
+    private const SCOPE = 'zharp/zharp';
 
-    /** Logs kept while they wait to be sent. When there are more, the oldest go first. */
-    public const MAX_QUEUED = 500;
-
-    private const LEVELS = ['debug', 'info', 'warn', 'error', 'fatal'];
-    private const ALIASES = [
-        'warning' => 'warn', 'notice' => 'info', 'critical' => 'fatal', 'alert' => 'fatal',
-        'emergency' => 'fatal', 'trace' => 'debug', 'err' => 'error',
+    /** OTLP severity numbers. */
+    public const SEVERITY = [
+        'trace' => 1, 'debug' => 5, 'info' => 9, 'notice' => 10, 'warn' => 13, 'warning' => 13,
+        'error' => 17, 'critical' => 21, 'fatal' => 21, 'alert' => 22, 'emergency' => 23,
     ];
 
-    /** How long a request may spend sending what's left when it ends (after the response, under FPM). */
-    private const END_SEND_SECONDS = 5.0;
-    /** How long a crashing script waits for its last logs to go out. */
-    private const CRASH_SEND_SECONDS = 2.0;
-
-    /** @var array<string, mixed>|null */
-    private static $setup;
-    /** @var array<int, array<string, mixed>> */
-    private static $queue = [];
-    /** @var float */
-    private static $lastSent = 0.0;
-    /** @var string|null */
-    private static $sessionId;
-    /** @var array<string, mixed> */
-    private static $extraContext = [];
-    /** @var array<string, mixed>|null */
-    private static $runtime;
-    /** @var bool */
-    private static $shutdownRegistered = false;
-    /** @var bool */
-    private static $exceptionHandlerSet = false;
+    private static ?Config $config = null;
+    private static ?TracerProvider $tracerProvider = null;
+    private static ?LoggerProviderInterface $loggerProvider = null;
+    private static ?TracerInterface $tracer = null;
+    private static ?LoggerInterface $logger = null;
+    private static ?TextMapPropagatorInterface $propagator = null;
+    /** @var array<string, string>|null */
+    private static ?array $user = null;
+    /** @var array<string, bool|int|float|string> */
+    private static array $tags = [];
+    /** @var WeakMap<Throwable, true>|null */
+    private static ?WeakMap $reported = null;
+    private static bool $shutdownRegistered = false;
     /** @var callable|null */
-    private static $previousExceptionHandler;
-    /** @var bool */
-    private static $reporting = false;
-    /** @var Transport|null For tests: the transport to use instead of making one. */
-    private static $transportOverride;
+    private static $previousExceptionHandler = null;
+    private static bool $exceptionHandlerSet = false;
 
     private function __construct()
     {
     }
 
     /**
-     * Start sending logs. Call once, as early as possible.
+     * Start sending traces, logs and errors. Call once, as early as possible.
      *
-     * Anything left out is read from the environment: ZHARP_API_KEY, ZHARP_SERVICE (then
-     * OTEL_SERVICE_NAME), ZHARP_ENV, ZHARP_VERSION, ZHARP_SOURCE, ZHARP_ENDPOINT. With no API key
-     * anywhere, nothing starts and a hint is written; ZHARP_DISABLED=true turns it off whatever the
-     * code says. Never throws.
-     *
-     * Options: api_key, service, environment, app_version, source, endpoint, flush_interval
-     * (seconds, for long-running processes; 5), max_batch_size (50), capture_exceptions (true —
-     * uncaught exceptions and fatal errors), quiet (false — true prints nothing at startup).
-     *
-     * In a script or command it prints one line to stderr:
-     * [Zharp] Logging active — service "checkout-api", environment "production".
-     * Under a web server it prints nothing, since it starts on every request.
+     * Options (each falls back to the environment variable): key (ZHARP_KEY), service
+     * (ZHARP_SERVICE, then OTEL_SERVICE_NAME), environment (ZHARP_ENVIRONMENT), release
+     * (ZHARP_RELEASE), endpoint (ZHARP_ENDPOINT), sample_rate (ZHARP_SAMPLE_RATE, 1.0),
+     * capture_uncaught (true: an uncaught exception or fatal error is reported).
+     * For tests: span_exporter / log_exporter replace OTLP and export synchronously.
+     * ZHARP_DISABLED=true turns it off. Returns whether it started.
      *
      * @param array<string, mixed> $options
      */
-    public static function init(array $options = []): void
+    public static function init(array $options = []): bool
     {
+        if (self::$config !== null) {
+            return true;
+        }
         try {
-            Env::$quiet = ($options['quiet'] ?? false) === true;
-            if (self::$setup !== null) {
-                // What the old setup queued is still sent, with its own key.
-                self::sendQueued(microtime(true) + self::CRASH_SEND_SECONDS);
+            if (Config::disabled()) {
+                return false;
             }
-            self::$setup = null;
+            $config = Config::resolve($options);
+            if ($config === null) {
+                if (empty($options['quiet'])) {
+                    error_log('[Zharp] No key — set ZHARP_KEY. Nothing is sent.');
+                }
 
-            if (Env::isTrue(Env::value('ZHARP_DISABLED'))) {
-                Env::announce('Logging disabled by ZHARP_DISABLED — nothing will be sent');
-
-                return;
+                return false;
             }
-            $key = Env::pick($options['api_key'] ?? null, Env::value('ZHARP_API_KEY'));
-            if ($key === null) {
-                Env::announce("No API key found — pass 'api_key' to Zharp::init(), or set ZHARP_API_KEY");
+            self::start($config, $options['span_exporter'] ?? null, $options['log_exporter'] ?? null);
 
-                return;
-            }
-            $service = Env::pick($options['service'] ?? null, Env::value('ZHARP_SERVICE'), Env::value('OTEL_SERVICE_NAME'), Env::projectName());
-            if ($service === null) {
-                // A warning, not an error: a missing name shouldn't stop the app, and the logs are
-                // still worth having under a placeholder.
-                Env::announce("No service name — pass 'service' to Zharp::init() or set ZHARP_SERVICE. Using 'unknown-service'.");
-                $service = 'unknown-service';
-            }
+            return true;
+        } catch (Throwable $e) {
+            error_log('[Zharp] Could not start: ' . $e->getMessage());
+            self::$config = null;
 
-            self::$setup = [
-                'service' => $service,
-                'environment' => Env::pick($options['environment'] ?? null, Env::value('ZHARP_ENV')),
-                'app_version' => Env::pick($options['app_version'] ?? null, Env::value('ZHARP_VERSION')),
-                'source' => Env::pick($options['source'] ?? null, Env::value('ZHARP_SOURCE')),
-                'flush_interval' => max(0.1, (float) ($options['flush_interval'] ?? 5)),
-                'max_batch_size' => max(1, (int) ($options['max_batch_size'] ?? 50)),
-                'transport' => self::$transportOverride ?? new Transport(
-                    $key,
-                    Transport::normalizeEndpoint(Env::pick($options['endpoint'] ?? null, Env::value('ZHARP_ENDPOINT')))
-                ),
-            ];
-            self::$lastSent = microtime(true);
-            self::registerShutdown();
-            if (($options['capture_exceptions'] ?? true) !== false) {
-                self::installExceptionHandler();
-            }
-            self::$setup['capture_fatal'] = ($options['capture_exceptions'] ?? true) !== false;
-
-            $env = self::$setup['environment'] !== null ? sprintf('environment "%s"', self::$setup['environment']) : 'no environment set';
-            Env::announce(sprintf('Logging active — service "%s", %s', $service, $env));
-        } catch (\Throwable $e) {
-            self::$setup = null;
+            return false;
         }
     }
 
-    /** Whether init() succeeded and logs are being sent. */
+    private static function start(Config $config, ?SpanExporterInterface $spanExporter, ?LogRecordExporterInterface $logExporter): void
+    {
+        $resource = ResourceInfoFactory::defaultResource()->merge(ResourceInfo::create(Attributes::create(array_filter([
+            'service.name' => $config->service,
+            'service.version' => $config->release,
+            'deployment.environment.name' => $config->environment,
+            'telemetry.sdk.name' => 'zharp',
+            'telemetry.sdk.language' => 'php',
+            'telemetry.sdk.version' => self::VERSION,
+        ], static fn ($v) => $v !== null && $v !== ''))));
+
+        $headers = ['Authorization' => 'Bearer ' . $config->key];
+        $clock = self::clock();
+        if ($spanExporter !== null) {
+            $spanProcessor = new SimpleSpanProcessor($spanExporter);
+        } else {
+            $transport = (new OtlpHttpTransportFactory())->create($config->endpoint . '/v1/traces', ContentTypes::PROTOBUF, $headers, 'gzip', 5.0);
+            $spanProcessor = new BatchSpanProcessor(new SpanExporter($transport), $clock);
+        }
+        if ($logExporter !== null) {
+            $logProcessor = new SimpleLogRecordProcessor($logExporter);
+        } else {
+            $transport = (new OtlpHttpTransportFactory())->create($config->endpoint . '/v1/logs', ContentTypes::PROTOBUF, $headers, 'gzip', 5.0);
+            $logProcessor = new BatchLogRecordProcessor(new LogsExporter($transport), $clock);
+        }
+
+        $tracerProvider = new TracerProvider(
+            [new ContextSpanProcessor(), $spanProcessor],
+            new ParentBased(new TraceIdRatioBasedSampler($config->sampleRate)),
+            $resource,
+        );
+        $loggerProvider = LoggerProvider::builder()
+            ->setResource($resource)
+            ->addLogRecordProcessor(new ContextLogProcessor())
+            ->addLogRecordProcessor($logProcessor)
+            ->build();
+        $propagator = new MultiTextMapPropagator([TraceContextPropagator::getInstance(), BaggagePropagator::getInstance()]);
+
+        self::$config = $config;
+        self::$tracerProvider = $tracerProvider;
+        self::$loggerProvider = $loggerProvider;
+        self::$propagator = $propagator;
+        self::$tracer = $tracerProvider->getTracer(self::SCOPE, self::VERSION);
+        self::$logger = $loggerProvider->getLogger(self::SCOPE, self::VERSION);
+        self::$reported = new WeakMap();
+
+        // OpenTelemetry instrumentation in the app (the opentelemetry extension's auto packages)
+        // uses the globals; they take these unless something read them before init.
+        if (method_exists(Globals::class, 'registerInitializer')) {
+            Globals::registerInitializer(static fn (Configurator $c): Configurator => $c
+                ->withTracerProvider($tracerProvider)
+                ->withLoggerProvider($loggerProvider)
+                ->withPropagator($propagator));
+        }
+
+        if (!self::$shutdownRegistered) {
+            self::$shutdownRegistered = true;
+            register_shutdown_function(static function (): void {
+                self::reportFatalError();
+                self::shutdown();
+            });
+        }
+        if ($config->captureUncaught && !self::$exceptionHandlerSet) {
+            self::$exceptionHandlerSet = true;
+            self::$previousExceptionHandler = set_exception_handler(static function (Throwable $e): void {
+                self::reportException($e, false);
+                $previous = self::$previousExceptionHandler;
+                if (is_callable($previous)) {
+                    $previous($e);
+
+                    return;
+                }
+                // What PHP does with no handler: print it and exit with status 255.
+                error_log('PHP Fatal error:  Uncaught ' . $e);
+                exit(255);
+            });
+        }
+    }
+
     public static function isActive(): bool
     {
-        return self::$setup !== null;
+        return self::$config !== null;
     }
 
-    /**
-     * @param mixed $message
-     * @param array<mixed> $context
-     */
-    public static function debug($message, array $context = []): void
+    // ── Logs ────────────────────────────────────────────────────────────────────────────────────
+
+    /** @param array<string, mixed> $attributes */
+    public static function debug(string $message, array $attributes = []): void
     {
-        self::log('debug', $message, $context);
+        self::log('debug', $message, $attributes);
     }
 
-    /**
-     * @param mixed $message
-     * @param array<mixed> $context
-     */
-    public static function info($message, array $context = []): void
+    /** @param array<string, mixed> $attributes */
+    public static function info(string $message, array $attributes = []): void
     {
-        self::log('info', $message, $context);
+        self::log('info', $message, $attributes);
     }
 
-    /**
-     * @param mixed $message
-     * @param array<mixed> $context
-     */
-    public static function warn($message, array $context = []): void
+    /** @param array<string, mixed> $attributes */
+    public static function warn(string $message, array $attributes = []): void
     {
-        self::log('warn', $message, $context);
+        self::log('warn', $message, $attributes);
     }
 
-    /**
-     * @param mixed $message
-     * @param array<mixed> $context
-     */
-    public static function warning($message, array $context = []): void
+    /** @param array<string, mixed> $attributes */
+    public static function error(string $message, array $attributes = []): void
     {
-        self::log('warn', $message, $context);
+        self::log('error', $message, $attributes);
+    }
+
+    /** @param array<string, mixed> $attributes */
+    public static function fatal(string $message, array $attributes = []): void
+    {
+        self::log('fatal', $message, $attributes);
     }
 
     /**
-     * An error; a Throwable as the message, or under 'exception' in the context, brings its stack.
+     * A log with the active trace and the request's user and session. An exception under the
+     * "exception" key is reported as an error (handled) unless it already was.
      *
-     * @param mixed $message
-     * @param array<mixed> $context
+     * @param array<string, mixed> $attributes
      */
-    public static function error($message, array $context = []): void
+    public static function log(string $level, string $message, array $attributes = []): void
     {
-        self::log('error', $message, $context);
+        $level = strtolower($level);
+        $exception = $attributes['exception'] ?? null;
+        unset($attributes['exception']);
+        self::emit(self::SEVERITY[$level] ?? 9, $level, $message, $attributes, $exception instanceof Throwable ? $exception : null, true);
     }
 
     /**
-     * @param mixed $message
-     * @param array<mixed> $context
-     */
-    public static function fatal($message, array $context = []): void
-    {
-        self::log('fatal', $message, $context);
-    }
-
-    /**
-     * @param mixed $message
-     * @param array<mixed> $context
-     */
-    public static function critical($message, array $context = []): void
-    {
-        self::log('fatal', $message, $context);
-    }
-
-    /**
-     * Log a caught exception as an error, with its type and stack (previous exceptions included).
+     * The one way logs leave: used by the log methods, the Monolog handler and the framework
+     * integrations. An exception already reported keeps the log line but not the error.
      *
-     * @param array<mixed> $context
+     * @internal
+     * @param array<string, mixed> $attributes
      */
-    public static function captureException(\Throwable $error, array $context = []): void
+    public static function emit(int $severity, string $severityText, string $body, array $attributes = [], ?Throwable $exception = null, bool $handled = true): void
     {
-        self::log('error', $error, $context);
-    }
-
-    /**
-     * Log at any level (PSR-3 names work too: warning, notice, critical…). $service files this one
-     * log under another service than the one set in init(). Before init() logs are dropped.
-     *
-     * @param mixed $message
-     * @param array<mixed> $context
-     */
-    public static function log(string $level, $message, array $context = [], ?string $service = null): void
-    {
-        if (self::$setup === null) {
+        $logger = self::$logger;
+        if ($logger === null) {
             return;
         }
         try {
-            $lvl = self::levelOf($level);
-            $error = $message instanceof \Throwable ? $message : Message::firstError($context);
-            self::push(self::buildEntry($lvl, $message, $context, $error, $service, microtime(true)), $lvl === 'error' || $lvl === 'fatal');
-        } catch (\Throwable $e) {
-            // Logging never takes the app down.
+            $attrs = Values::attributes($attributes);
+            if ($exception !== null && !self::isReported($exception)) {
+                self::markReported($exception);
+                $attrs += Exceptions::attributes($exception, $handled);
+            }
+            $attrs += self::contextAttributes(Context::getCurrent());
+            $logger->emit(
+                (new LogRecord($body))
+                    ->setTimestamp((int) (microtime(true) * 1e9))
+                    ->setSeverityNumber($severity)
+                    ->setSeverityText(strtoupper($severityText === 'warning' ? 'warn' : $severityText))
+                    ->setAttributes($attrs)
+                    ->setContext(Context::getCurrent())
+            );
+        } catch (Throwable) {
+            // never into the app
         }
     }
 
-    /** The ID every log of this request (or script run) carries, so they can be found together. */
-    public static function sessionId(): string
-    {
-        if (self::$sessionId === null) {
-            self::$sessionId = self::uuid();
-        }
-
-        return self::$sessionId;
-    }
-
-    /** Start a new session ID, e.g. per job in a long-running worker. */
-    public static function resetSessionId(): void
-    {
-        self::$sessionId = self::uuid();
-    }
+    // ── Errors ──────────────────────────────────────────────────────────────────────────────────
 
     /**
-     * Extra fields added to every log's context, e.g. a signed-in user's ID. Replaces what was set
-     * before; pass [] to clear it.
+     * Report an exception you caught. It becomes a Zharp issue (handled) with the request's
+     * trace, user and session.
      *
-     * @param array<mixed> $context
+     * @param array<string, mixed> $attributes
      */
-    public static function setContext(array $context): void
+    public static function captureError(Throwable $error, array $attributes = []): void
     {
-        self::$extraContext = Message::toJsonMap($context);
+        self::emit(17, 'error', get_class($error) . ': ' . $error->getMessage(), $attributes, $error, true);
     }
 
     /**
-     * Send everything queued now, waiting at most $timeout seconds. Returns whether all of it went.
-     * Normally not needed — it happens when the request ends — but useful at the end of a job.
-     */
-    public static function flush(float $timeout = 5.0): bool
-    {
-        if (self::$setup === null) {
-            return true;
-        }
-
-        return self::sendQueued(microtime(true) + $timeout);
-    }
-
-    /** Send everything queued and stop. Logs after this are dropped until init() again. */
-    public static function close(float $timeout = 5.0): bool
-    {
-        $sent = self::flush($timeout);
-        self::$setup = null;
-
-        return $sent;
-    }
-
-    /**
-     * The entry as Zharp takes it — the same shape every Zharp SDK sends.
+     * Report an exception that escaped (handled=false) and mark the current span as failed. What
+     * the framework integrations call for an uncaught exception.
      *
      * @internal
-     * @param mixed $message
-     * @param array<mixed> $context
-     * @return array<string, mixed>
      */
-    public static function buildEntry(string $level, $message, array $context, ?\Throwable $error, ?string $service, float $time): array
+    public static function reportException(Throwable $error, bool $handled = false, ?SpanInterface $span = null): void
     {
-        $setup = self::$setup ?? ['service' => 'unknown-service', 'environment' => null, 'app_version' => null, 'source' => null];
-        $entry = [
-            'service' => $service !== null && trim($service) !== '' ? trim($service) : $setup['service'],
-            'level' => $level,
-            'message' => Message::toMessage($message),
-            'timestamp' => Message::iso($time),
-        ];
-        // The tags the log viewer filters by, top level where the backend reads them; absent rather
-        // than empty when not configured.
-        if ($setup['environment'] !== null) {
-            $entry['environment'] = $setup['environment'];
+        $span ??= Span::getCurrent();
+        if (!$handled && $span->isRecording()) {
+            $span->setStatus(StatusCode::STATUS_ERROR, $error->getMessage());
         }
-        if ($setup['app_version'] !== null) {
-            $entry['version'] = $setup['app_version'];
-        }
-        if ($setup['source'] !== null) {
-            $entry['source'] = $setup['source'];
-        }
-
-        $meta = [];
-        if ($error !== null) {
-            // Under the keys the log viewer shows; a stack the caller gave wins.
-            $meta['name'] = get_class($error);
-            $meta['stack'] = Message::stackOf($error);
-        }
-        foreach (Message::toJsonMap($context) as $key => $value) {
-            $meta[$key] = $value;
-        }
-        $meta['sessionId'] = self::sessionId();
-        if ($setup['environment'] !== null) {
-            $meta['environment'] = $setup['environment'];
-        }
-        $runtime = self::runtimeContext();
-        foreach (self::$extraContext as $key => $value) {
-            $runtime[$key] = $value;
-        }
-        if ($setup['app_version'] !== null) {
-            $runtime['appVersion'] = $setup['app_version'];
-        }
-        $meta['context'] = $runtime;
-        $entry['metadata'] = $meta;
-
-        return $entry;
-    }
-
-    /** @internal Maps any level name to one of Zharp's. */
-    public static function levelOf(string $level): string
-    {
-        $name = strtolower(trim($level));
-        $name = self::ALIASES[$name] ?? $name;
-
-        return in_array($name, self::LEVELS, true) ? $name : 'info';
-    }
-
-    /**
-     * @param array<string, mixed> $entry
-     */
-    private static function push(array $entry, bool $urgent): void
-    {
-        self::$queue[] = $entry;
-        if (count(self::$queue) > self::MAX_QUEUED) {
-            array_shift(self::$queue);
-        }
-        // A web request sends once, when it ends. A long-running process can't wait for that.
-        if (PHP_SAPI === 'cli' || PHP_SAPI === 'phpdbg') {
-            $due = $urgent
-                || count(self::$queue) >= self::$setup['max_batch_size']
-                || microtime(true) - self::$lastSent >= self::$setup['flush_interval'];
-            if ($due) {
-                self::sendQueued(microtime(true) + self::CRASH_SEND_SECONDS);
-            }
-        }
-    }
-
-    private static function sendQueued(float $deadline): bool
-    {
-        $setup = self::$setup;
-        if ($setup === null || !self::$queue) {
-            return true;
-        }
-        $delivered = true;
-        while (self::$queue && microtime(true) < $deadline) {
-            $batch = array_splice(self::$queue, 0, $setup['max_batch_size']);
-            try {
-                if (!$setup['transport']->send($batch, $deadline)) {
-                    $delivered = false;
-                }
-            } catch (\Throwable $e) {
-                $delivered = false;
-            }
-        }
-        self::$lastSent = microtime(true);
-        if (self::$queue) {
-            // Out of time: what's left is dropped rather than holding the process.
-            self::$queue = [];
-            $delivered = false;
-        }
-
-        return $delivered;
-    }
-
-    private static function registerShutdown(): void
-    {
-        if (self::$shutdownRegistered) {
-            return;
-        }
-        self::$shutdownRegistered = true;
-        // Registered from inside a shutdown function, so it runs after the app's own — and sends
-        // what they logged too.
-        register_shutdown_function(static function (): void {
-            register_shutdown_function([self::class, 'onShutdown']);
-        });
+        self::emit(17, 'error', get_class($error) . ': ' . $error->getMessage(), [], $error, $handled);
     }
 
     /** @internal */
-    public static function onShutdown(): void
+    public static function isReported(Throwable $error): bool
     {
-        if (self::$setup === null) {
-            return;
-        }
-        if (self::$setup['capture_fatal'] ?? false) {
-            self::reportFatalError();
-        }
-        if (!self::$queue) {
-            return;
-        }
-        // Under FPM or LiteSpeed, send after the response has gone: the browser doesn't wait on
-        // Zharp. (PHP's built-in server can't, so there a request waits for the send.)
-        if (PHP_SAPI !== 'cli') {
-            if (function_exists('fastcgi_finish_request')) {
-                @fastcgi_finish_request();
-            } elseif (function_exists('litespeed_finish_request')) {
-                @litespeed_finish_request();
-            }
-        }
-        self::sendQueued(microtime(true) + self::END_SEND_SECONDS);
+        return self::$reported !== null && isset(self::$reported[$error]);
     }
 
-    /** A fatal error (out of memory, a parse error in an include…) ends the script without an exception. */
+    /** @internal */
+    public static function markReported(Throwable $error): void
+    {
+        if (self::$reported !== null) {
+            self::$reported[$error] = true;
+        }
+    }
+
     private static function reportFatalError(): void
     {
         $error = error_get_last();
-        $fatal = E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR;
-        if ($error === null || ($error['type'] & $fatal) === 0) {
+        if ($error === null || self::$config === null || !self::$config->captureUncaught
+            || !($error['type'] & (E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR))) {
             return;
         }
-        // An uncaught exception also ends as a fatal error; it's been sent already.
-        if (strpos($error['message'], 'Uncaught ') === 0 && self::$exceptionHandlerSet) {
+        // An uncaught exception also ends as "Uncaught …" here; it was reported already.
+        if (str_starts_with($error['message'], 'Uncaught ')) {
             return;
         }
-        self::log('fatal', $error['message'], [
-            'type' => 'fatalError',
-            'name' => 'FatalError',
-            'stack' => sprintf("PHP Fatal error: %s in %s:%d", $error['message'], $error['file'], $error['line']),
-            'file' => $error['file'],
-            'line' => $error['line'],
+        self::emit(21, 'fatal', 'FatalError: ' . $error['message'], [
+            'exception.type' => 'FatalError',
+            'exception.message' => $error['message'],
+            'exception.stacktrace' => "FatalError: {$error['message']}\n#0 {$error['file']}({$error['line']})",
+            'zharp.handled' => 'false',
         ]);
     }
 
-    private static function installExceptionHandler(): void
+    // ── Context ─────────────────────────────────────────────────────────────────────────────────
+
+    /**
+     * The user of the current request (enduser.id …) on its spans, logs and errors from here on.
+     * A front end using a Zharp SDK sends its user with each request; this is for when the
+     * server knows better. The framework integrations clear it when a request ends.
+     */
+    public static function setUser(string|int|null $id = null, ?string $email = null, ?string $name = null): void
     {
-        if (self::$exceptionHandlerSet) {
-            return;
+        $user = array_filter([
+            'enduser.id' => $id === null ? null : (string) $id,
+            'enduser.email' => $email,
+            'enduser.name' => $name,
+        ], static fn ($v) => $v !== null && $v !== '');
+        self::$user = $user;
+        $span = Span::getCurrent();
+        if ($span->isRecording() && $user !== []) {
+            $span->setAttributes($user);
         }
-        self::$exceptionHandlerSet = true;
-        self::$previousExceptionHandler = set_exception_handler([self::class, 'handleException']);
+    }
+
+    public static function clearUser(): void
+    {
+        self::$user = null;
+    }
+
+    /** An attribute on every span and log from now on; null removes it. */
+    public static function setTag(string $key, bool|int|float|string|null $value): void
+    {
+        if ($value === null) {
+            unset(self::$tags[$key]);
+        } else {
+            self::$tags[$key] = $value;
+        }
     }
 
     /**
-     * An uncaught exception: sent as fatal with its stack, then handled as it would have been — by
-     * the handler that was set before, or as PHP does (reported, and the script ends with code 255).
+     * Tags, then user and session from the parent span, the baggage a Zharp front end sent, and
+     * setUser (later wins).
      *
      * @internal
+     * @return array<string, bool|int|float|string>
      */
-    public static function handleException(\Throwable $error): void
+    public static function contextAttributes(ContextInterface $context): array
     {
-        if (!self::$reporting) {
-            self::$reporting = true;
-            try {
-                self::log('fatal', $error, ['type' => 'uncaughtException']);
-                self::sendQueued(microtime(true) + self::CRASH_SEND_SECONDS);
-            } catch (\Throwable $ignored) {
-            }
-            self::$reporting = false;
-        }
-
-        if (self::$previousExceptionHandler !== null) {
-            (self::$previousExceptionHandler)($error);
-
-            return;
-        }
-        $report = sprintf("PHP Fatal error:  Uncaught %s\n  thrown in %s on line %d", (string) $error, $error->getFile(), $error->getLine());
-        if (PHP_SAPI === 'cli' && defined('STDERR')) {
-            fwrite(STDERR, $report . PHP_EOL);
-        } else {
-            error_log($report);
-            if (!headers_sent()) {
-                http_response_code(500);
+        $out = self::$tags;
+        $parent = Span::fromContext($context);
+        if ($parent instanceof ReadableSpanInterface) {
+            foreach (['enduser.id', 'enduser.email', 'enduser.name', 'session.id'] as $key) {
+                $value = $parent->getAttribute($key);
+                if (is_string($value) && $value !== '') {
+                    $out[$key] = $value;
+                }
             }
         }
-        exit(255);
+        $baggage = Baggage::fromContext($context);
+        foreach (['enduser.id', 'session.id'] as $key) {
+            $value = $baggage->getValue($key);
+            if (is_scalar($value) && (string) $value !== '') {
+                $out[$key] = (string) $value;
+            }
+        }
+        if (self::$user !== null) {
+            unset($out['enduser.id'], $out['enduser.email'], $out['enduser.name']);
+            $out = self::$user + $out;
+        }
+
+        return $out;
     }
 
+    // ── Spans ───────────────────────────────────────────────────────────────────────────────────
+
     /**
-     * What is known about where the program runs. The request's method and path are read per log,
-     * since a long-running server handles many.
+     * A span around some work. An exception marks it failed and is rethrown (the framework
+     * reports it).
      *
-     * @return array<string, mixed>
+     * @template T
+     * @param callable(SpanInterface): T $work
+     * @param array<string, mixed> $attributes
+     * @return T
      */
-    private static function runtimeContext(): array
+    public static function startSpan(string $name, callable $work, array $attributes = []): mixed
     {
-        if (self::$runtime === null) {
-            $host = Env::value('HOSTNAME') ?? (gethostname() ?: null);
-            self::$runtime = array_filter([
-                'hostname' => $host,
-                'phpVersion' => PHP_VERSION,
-                'platform' => PHP_OS_FAMILY,
-                'sapi' => PHP_SAPI,
-            ], static function ($v) {
-                return $v !== null;
-            });
+        $span = self::tracer()->spanBuilder($name)->setAttributes(Values::attributes($attributes))->startSpan();
+        $scope = $span->activate();
+        try {
+            return $work($span);
+        } catch (Throwable $e) {
+            $span->setStatus(StatusCode::STATUS_ERROR, $e->getMessage());
+            throw $e;
+        } finally {
+            $scope->detach();
+            $span->end();
         }
-        $context = self::$runtime;
-        $context['pid'] = (string) getmypid();
-        if (isset($_SERVER['REQUEST_METHOD']) && PHP_SAPI !== 'cli') {
-            $context['method'] = (string) $_SERVER['REQUEST_METHOD'];
-            // The path only: a query string can carry tokens.
-            $context['path'] = (string) parse_url((string) ($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_PATH);
+    }
+
+    /** A tracer for spans of your own. */
+    public static function tracer(): TracerInterface
+    {
+        return self::$tracer ?? Globals::tracerProvider()->getTracer(self::SCOPE, self::VERSION);
+    }
+
+    /** @internal W3C tracecontext + baggage. */
+    public static function propagator(): TextMapPropagatorInterface
+    {
+        return self::$propagator ?? Globals::propagator();
+    }
+
+    // ── Sending ─────────────────────────────────────────────────────────────────────────────────
+
+    /** Send what's queued now — the integrations call it once each response is out. */
+    public static function flush(): bool
+    {
+        $ok = true;
+        try {
+            $ok = (self::$tracerProvider?->forceFlush() ?? true) && $ok;
+            $ok = (self::$loggerProvider?->forceFlush() ?? true) && $ok;
+        } catch (Throwable) {
+            return false;
         }
 
-        return $context;
+        return $ok;
     }
 
-    private static function uuid(): string
+    /** Send what's left and stop. Runs by itself when the script ends. */
+    public static function shutdown(): void
     {
-        $bytes = random_bytes(16);
-        $bytes[6] = chr((ord($bytes[6]) & 0x0f) | 0x40); // version 4
-        $bytes[8] = chr((ord($bytes[8]) & 0x3f) | 0x80); // RFC 4122 variant
-
-        return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($bytes), 4));
+        try {
+            self::$tracerProvider?->shutdown();
+            self::$loggerProvider?->shutdown();
+        } catch (Throwable) {
+        }
+        self::$config = null;
+        self::$tracerProvider = null;
+        self::$loggerProvider = null;
+        self::$tracer = null;
+        self::$logger = null;
     }
 
-    /** @internal For tests: start from nothing, sending through $transport. */
-    public static function resetForTests(?Transport $transport = null): void
+    /** @internal For tests: forget everything so init() can run again. */
+    public static function resetForTests(): void
     {
-        self::$setup = null;
-        self::$queue = [];
-        self::$extraContext = [];
-        self::$sessionId = null;
-        self::$transportOverride = $transport;
+        self::shutdown();
+        self::$user = null;
+        self::$tags = [];
+        self::$reported = null;
+        if (self::$exceptionHandlerSet) {
+            restore_exception_handler();
+            self::$exceptionHandlerSet = false;
+            self::$previousExceptionHandler = null;
+        }
     }
 
-    /**
-     * @internal For tests: what's waiting to be sent.
-     * @return array<int, array<string, mixed>>
-     */
-    public static function queued(): array
+    private static function clock(): \OpenTelemetry\API\Common\Time\ClockInterface
     {
-        return self::$queue;
+        if (class_exists(\OpenTelemetry\API\Common\Time\Clock::class)) {
+            return \OpenTelemetry\API\Common\Time\Clock::getDefault();
+        }
+
+        /** @phpstan-ignore-next-line older SDKs */
+        return \OpenTelemetry\SDK\Common\Time\ClockFactory::getDefault();
     }
 }

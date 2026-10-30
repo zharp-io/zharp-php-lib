@@ -1,71 +1,90 @@
 <?php
 
-namespace Zharp\Logs\Monolog;
+declare(strict_types=1);
+
+namespace Zharp\Monolog;
 
 use Monolog\Handler\AbstractProcessingHandler;
-use Zharp\Logs\Zharp;
+use Throwable;
+use Zharp\Config;
+use Zharp\Zharp;
 
 /**
- * A Monolog handler that sends records to Zharp — the log channel for Laravel and Symfony.
+ * Sends Monolog records (Monolog 2 and 3) to Zharp as OpenTelemetry logs, with the active trace
+ * and the request's user and session. Context and extra become attributes; an exception under
+ * the "exception" key is reported as an error unless it already was. Start Zharp first.
  *
- * Works with Monolog 2 and 3. Each record goes at the matching level with its channel, context and
- * extra; an exception under 'exception' in the context (where Laravel and Symfony put reported
- * exceptions) brings its stack. Start Zharp with Zharp::init() first (the Laravel service provider
- * does); records before that are dropped.
+ *     $logger->pushHandler(new ZharpHandler('info'));
  *
- *     $logger->pushHandler(new ZharpHandler());
+ * The Symfony bundle adds it to every Monolog channel; Laravel is bridged through its log events
+ * instead, so this handler is for Monolog setups of your own.
  */
 class ZharpHandler extends AbstractProcessingHandler
 {
-    /** @var string|null */
-    private $service;
+    /** Monolog level → OTLP severity number. */
+    private const SEVERITY = [100 => 5, 200 => 9, 250 => 10, 300 => 13, 400 => 17, 500 => 21, 550 => 22, 600 => 23];
+
+    private bool $enabled = true;
 
     /**
-     * @param int|string|mixed $level The lowest level sent: a Monolog level, 'debug' (100) unless given
-     * @param string|null $service Files these logs under another service than Zharp::init()'s
+     * @param int|string|\Monolog\Level $level the lowest level sent
      */
-    public function __construct($level = 100, bool $bubble = true, ?string $service = null)
+    public function __construct($level = 'debug', bool $bubble = true)
     {
         parent::__construct($level, $bubble);
-        $this->service = $service;
+    }
+
+    /** A handler at ZHARP_LOG_LEVEL (info by default; "off" sends nothing). */
+    public static function fromEnvironment(): self
+    {
+        $level = self::levelFromEnvironment();
+        $handler = new self($level ?? 'emergency');
+        $handler->enabled = $level !== null;
+
+        return $handler;
+    }
+
+    /** ZHARP_LOG_LEVEL as a Monolog level name; null when logs are turned off. */
+    public static function levelFromEnvironment(): ?string
+    {
+        $level = strtolower(Config::env('ZHARP_LOG_LEVEL') ?? 'info');
+        if (in_array($level, ['off', 'false', 'none', '0'], true)) {
+            return null;
+        }
+        $level = ['warn' => 'warning', 'fatal' => 'critical', 'trace' => 'debug'][$level] ?? $level;
+
+        return in_array($level, ['debug', 'info', 'notice', 'warning', 'error', 'critical', 'alert', 'emergency'], true) ? $level : 'info';
     }
 
     /**
-     * Untyped, so the same class fits Monolog 2 (an array) and Monolog 3 (a LogRecord, which reads
-     * like an array too).
-     *
-     * @param array<string, mixed>|\ArrayAccess<string, mixed> $record
+     * @param array<string, mixed>|\Monolog\LogRecord $record
      */
     protected function write($record): void
     {
-        $context = is_array($record['context'] ?? null) ? $record['context'] : [];
-        $extra = is_array($record['extra'] ?? null) ? $record['extra'] : [];
-        $fields = $context;
-        $fields['channel'] = $record['channel'] ?? null;
-        if ($extra) {
-            $fields['extra'] = $extra;
+        if (!$this->enabled || !Zharp::isActive()) {
+            return;
         }
+        // Monolog 3's LogRecord reads like Monolog 2's array.
+        $level = (int) $record['level'];
+        $context = (array) $record['context'];
+        $extra = (array) $record['extra'];
+        $exception = $context['exception'] ?? null;
+        unset($context['exception']);
 
-        // An exception in the context (Laravel and Symfony put it under 'exception') brings its stack.
-        Zharp::log(self::levelName((int) ($record['level'] ?? 200)), (string) ($record['message'] ?? ''), $fields, $this->service);
-    }
+        $attributes = $context;
+        foreach ($extra as $key => $value) {
+            $attributes['extra.' . $key] = $value;
+        }
+        $attributes['log.channel'] = (string) $record['channel'];
 
-    /** Monolog's numeric levels (the same in 2 and 3) as Zharp's. */
-    public static function levelName(int $level): string
-    {
-        if ($level >= 500) {
-            return 'fatal'; // CRITICAL, ALERT, EMERGENCY
-        }
-        if ($level >= 400) {
-            return 'error';
-        }
-        if ($level >= 300) {
-            return 'warn';
-        }
-        if ($level >= 200) {
-            return 'info'; // INFO, NOTICE
-        }
-
-        return 'debug';
+        $severity = self::SEVERITY[$level] ?? ($level >= 400 ? 17 : 9);
+        Zharp::emit(
+            $severity,
+            strtolower((string) $record['level_name']),
+            (string) $record['message'],
+            $attributes,
+            $exception instanceof Throwable ? $exception : null,
+            true,
+        );
     }
 }
