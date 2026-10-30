@@ -41,6 +41,7 @@ class ZharpServiceProvider extends ServiceProvider
             'release' => $config['release'] ?? null,
             'endpoint' => $config['endpoint'] ?? null,
             'sample_rate' => $config['sample_rate'] ?? null,
+            'tracing' => $config['tracing'] ?? null,
             // Laravel's exception handler reports uncaught exceptions; Zharp listens there.
             'capture_uncaught' => false,
             'quiet' => true,
@@ -49,6 +50,8 @@ class ZharpServiceProvider extends ServiceProvider
             return;
         }
 
+        // With tracing off the middleware still runs: no span, but the caller's traceparent and
+        // baggage become current so the request's logs carry its trace_id, user and session.
         if (filter_var($config['trace_requests'] ?? true, FILTER_VALIDATE_BOOL)) {
             $this->traceRequests();
         }

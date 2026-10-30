@@ -21,6 +21,7 @@ final class Config
         public readonly string $endpoint,
         public readonly float $sampleRate,
         public readonly bool $captureUncaught,
+        public readonly bool $tracing,
     ) {
     }
 
@@ -44,7 +45,30 @@ final class Config
             rtrim(self::first($options['endpoint'] ?? null, self::env('ZHARP_ENDPOINT')) ?? self::DEFAULT_ENDPOINT, '/'),
             ($rate > 0.0 && $rate <= 1.0) ? $rate : 1.0,
             (bool) ($options['capture_uncaught'] ?? true),
+            self::flag($options['tracing'] ?? self::env('ZHARP_TRACING'), true),
         );
+    }
+
+    /** true/false, 1/0, yes/no, on/off; anything else (or unset) is the default. */
+    private static function flag(mixed $value, bool $default): bool
+    {
+        if (is_bool($value)) {
+            return $value;
+        }
+        if (is_int($value)) {
+            return $value !== 0;
+        }
+        if (is_string($value)) {
+            $value = strtolower(trim($value));
+            if (in_array($value, ['1', 'true', 'yes', 'on'], true)) {
+                return true;
+            }
+            if (in_array($value, ['0', 'false', 'no', 'off'], true)) {
+                return false;
+            }
+        }
+
+        return $default;
     }
 
     public static function disabled(): bool

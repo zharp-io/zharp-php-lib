@@ -71,6 +71,20 @@ Zharp::flush();                                          // send now
 A browser or mobile app using a Zharp SDK sends `traceparent` and `baggage` (`enduser.id`,
 `session.id`) with its API calls; the request's span and logs carry them with no code.
 
+## Logs only
+
+Logs, errors, user/session and tags without any tracing:
+
+```php
+Zharp\Zharp::init(['key' => 'zpk_…', 'service' => 'checkout-api', 'tracing' => false]);
+```
+
+or `ZHARP_TRACING=false` in `.env` (Laravel, Symfony, plain PHP). No spans are made or sent,
+`Zharp::startSpan()` just runs its callback, and OpenTelemetry instrumentation gets no tracer or
+propagator, so nothing adds `traceparent`/`baggage` to outgoing requests. An incoming
+`traceparent` and `baggage` are still read by the Laravel middleware / Symfony subscriber, so a
+request's logs and errors keep the caller's trace id, user and session.
+
 ## Database and HTTP client spans
 
 PHP needs the [`opentelemetry` extension](https://opentelemetry.io/docs/zero-code/php/) for
@@ -90,6 +104,7 @@ traced by Zharp's middleware / subscriber.
 | `endpoint` | `ZHARP_ENDPOINT` | `https://api.zharp.io/api/v1/otlp` |
 | `sample_rate` | `ZHARP_SAMPLE_RATE` | `1.0` (share of traces kept; logs and errors always sent) |
 | — | `ZHARP_LOG_LEVEL` | `info` (`off` sends no framework logs) |
+| `tracing` | `ZHARP_TRACING` | `true` (`false` = logs only) |
 | `capture_uncaught` | — | `true` (the framework integrations use the framework's handler instead) |
 
 `ZHARP_DISABLED=true` turns it off. Zharp never throws into your app.

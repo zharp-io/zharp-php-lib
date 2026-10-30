@@ -17,6 +17,10 @@ return [
     // Share of traces kept, 0.0–1.0. Logs and errors are always sent.
     'sample_rate' => env('ZHARP_SAMPLE_RATE', 1.0),
 
+    // false = logs only: logs, errors, user/session and tags are still sent, but no spans are
+    // made or sent and no traceparent is added to outgoing requests.
+    'tracing' => env('ZHARP_TRACING', true),
+
     // Trace every HTTP request (a SERVER span each).
     'trace_requests' => env('ZHARP_TRACE_REQUESTS', true),
 

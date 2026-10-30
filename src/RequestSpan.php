@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Zharp;
 
+use OpenTelemetry\API\Trace\Span;
 use OpenTelemetry\API\Trace\SpanInterface;
 use OpenTelemetry\API\Trace\SpanKind;
 use OpenTelemetry\API\Trace\StatusCode;
@@ -13,7 +14,8 @@ use Throwable;
 /**
  * The SERVER span of one incoming request, for framework integrations: continues the caller's
  * trace from traceparent, carries baggage (enduser.id, session.id) into the request's context,
- * and is active until end().
+ * and is active until end(). With tracing off there is no span: only the caller's trace context
+ * is made current, so logs carry its trace_id.
  *
  * Without the opentelemetry extension nothing traces requests automatically, so the Laravel
  * middleware and the Symfony subscriber make this span themselves.
@@ -50,6 +52,12 @@ final class RequestSpan
         $parent = Zharp::propagator()->extract($carrier);
         $userAgent = $carrier['user-agent'] ?? null;
         $userAgent = is_array($userAgent) ? ($userAgent[0] ?? null) : $userAgent;
+
+        if (!Zharp::isTracing()) {
+            // Logs only: no span. The caller's trace (and baggage) is still made current, so log
+            // lines and errors in this request carry its trace_id; setRoute/end do nothing.
+            return new self(Span::fromContext($parent), $parent->activate(), $method);
+        }
 
         $span = Zharp::tracer()->spanBuilder($method)
             ->setSpanKind(SpanKind::KIND_SERVER)

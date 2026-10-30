@@ -12,5 +12,7 @@
   reported (unhandled), every Monolog channel bridged.
 - `Zharp\Monolog\ZharpHandler` for Monolog 2/3; `enduser.id` / `session.id` from baggage on every
   span and log; `Zharp::setUser`, `setTag`, `captureError` (handled), `startSpan`, `flush`.
+- Logs only: `'tracing' => false` / `ZHARP_TRACING=false` sends logs, errors and context with no
+  spans and no outgoing `traceparent`; an incoming trace still reaches the request's logs.
 - Each exception is reported once even when both the framework handler and its log see it.
 - Replaces the logs-only `zharp/logs` 0.1.x package.

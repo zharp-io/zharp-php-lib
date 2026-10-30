@@ -10,6 +10,7 @@ use OpenTelemetry\API\Globals;
 use OpenTelemetry\API\Instrumentation\Configurator;
 use OpenTelemetry\API\Logs\LoggerInterface;
 use OpenTelemetry\API\Logs\LogRecord;
+use OpenTelemetry\API\Trace\NoopTracer;
 use OpenTelemetry\API\Trace\Propagation\TraceContextPropagator;
 use OpenTelemetry\API\Trace\Span;
 use OpenTelemetry\API\Trace\SpanInterface;
@@ -92,7 +93,9 @@ final class Zharp
      * Options (each falls back to the environment variable): key (ZHARP_KEY), service
      * (ZHARP_SERVICE, then OTEL_SERVICE_NAME), environment (ZHARP_ENVIRONMENT), release
      * (ZHARP_RELEASE), endpoint (ZHARP_ENDPOINT), sample_rate (ZHARP_SAMPLE_RATE, 1.0),
-     * capture_uncaught (true: an uncaught exception or fatal error is reported).
+     * capture_uncaught (true: an uncaught exception or fatal error is reported), tracing
+     * (ZHARP_TRACING, true; false = logs only: logs, errors and context still go out, but no
+     * spans are made or sent and OpenTelemetry instrumentation gets no tracer or propagator).
      * For tests: span_exporter / log_exporter replace OTLP and export synchronously.
      * ZHARP_DISABLED=true turns it off. Returns whether it started.
      *
@@ -139,11 +142,19 @@ final class Zharp
 
         $headers = ['Authorization' => 'Bearer ' . $config->key];
         $clock = self::clock();
-        if ($spanExporter !== null) {
-            $spanProcessor = new SimpleSpanProcessor($spanExporter);
-        } else {
-            $transport = (new OtlpHttpTransportFactory())->create($config->endpoint . '/v1/traces', ContentTypes::PROTOBUF, $headers, 'gzip', 5.0);
-            $spanProcessor = new BatchSpanProcessor(new SpanExporter($transport), $clock);
+        $tracerProvider = null;
+        if ($config->tracing) {
+            if ($spanExporter !== null) {
+                $spanProcessor = new SimpleSpanProcessor($spanExporter);
+            } else {
+                $transport = (new OtlpHttpTransportFactory())->create($config->endpoint . '/v1/traces', ContentTypes::PROTOBUF, $headers, 'gzip', 5.0);
+                $spanProcessor = new BatchSpanProcessor(new SpanExporter($transport), $clock);
+            }
+            $tracerProvider = new TracerProvider(
+                [new ContextSpanProcessor(), $spanProcessor],
+                new ParentBased(new TraceIdRatioBasedSampler($config->sampleRate)),
+                $resource,
+            );
         }
         if ($logExporter !== null) {
             $logProcessor = new SimpleLogRecordProcessor($logExporter);
@@ -152,11 +163,6 @@ final class Zharp
             $logProcessor = new BatchLogRecordProcessor(new LogsExporter($transport), $clock);
         }
 
-        $tracerProvider = new TracerProvider(
-            [new ContextSpanProcessor(), $spanProcessor],
-            new ParentBased(new TraceIdRatioBasedSampler($config->sampleRate)),
-            $resource,
-        );
         $loggerProvider = LoggerProvider::builder()
             ->setResource($resource)
             ->addLogRecordProcessor(new ContextLogProcessor())
@@ -168,17 +174,22 @@ final class Zharp
         self::$tracerProvider = $tracerProvider;
         self::$loggerProvider = $loggerProvider;
         self::$propagator = $propagator;
-        self::$tracer = $tracerProvider->getTracer(self::SCOPE, self::VERSION);
+        // Logs only: no spans at all. startSpan() just runs its callback; request integrations
+        // still extract an incoming traceparent so log lines carry the caller's trace_id.
+        self::$tracer = $tracerProvider?->getTracer(self::SCOPE, self::VERSION) ?? NoopTracer::getInstance();
         self::$logger = $loggerProvider->getLogger(self::SCOPE, self::VERSION);
         self::$reported = new WeakMap();
 
         // OpenTelemetry instrumentation in the app (the opentelemetry extension's auto packages)
         // uses the globals; they take these unless something read them before init.
         if (method_exists(Globals::class, 'registerInitializer')) {
-            Globals::registerInitializer(static fn (Configurator $c): Configurator => $c
-                ->withTracerProvider($tracerProvider)
-                ->withLoggerProvider($loggerProvider)
-                ->withPropagator($propagator));
+            // Logs only: instrumentation keeps the no-op tracer and propagator, so it makes no
+            // spans and injects no traceparent/baggage into outgoing requests.
+            Globals::registerInitializer(static fn (Configurator $c): Configurator => $tracerProvider === null
+                ? $c->withLoggerProvider($loggerProvider)
+                : $c->withTracerProvider($tracerProvider)
+                    ->withLoggerProvider($loggerProvider)
+                    ->withPropagator($propagator));
         }
 
         if (!self::$shutdownRegistered) {
@@ -208,6 +219,12 @@ final class Zharp
     public static function isActive(): bool
     {
         return self::$config !== null;
+    }
+
+    /** Whether spans are made and sent (false with tracing => false / ZHARP_TRACING=false). */
+    public static function isTracing(): bool
+    {
+        return self::$config !== null && self::$config->tracing;
     }
 
     // ── Logs ────────────────────────────────────────────────────────────────────────────────────
@@ -424,7 +441,7 @@ final class Zharp
 
     /**
      * A span around some work. An exception marks it failed and is rethrown (the framework
-     * reports it).
+     * reports it). With tracing off it only runs the work (given the current, non-recording span).
      *
      * @template T
      * @param callable(SpanInterface): T $work
@@ -433,6 +450,9 @@ final class Zharp
      */
     public static function startSpan(string $name, callable $work, array $attributes = []): mixed
     {
+        if (self::$config !== null && !self::$config->tracing) {
+            return $work(Span::getCurrent());
+        }
         $span = self::tracer()->spanBuilder($name)->setAttributes(Values::attributes($attributes))->startSpan();
         $scope = $span->activate();
         try {
