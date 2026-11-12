@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.0 (`zharp/zharp`)
 
 - `capture_bodies` (`ZHARP_CAPTURE_BODIES`), off by default: request and response bodies on the
   Laravel and Symfony request spans (`http.request.body`, `http.response.body`, their content
