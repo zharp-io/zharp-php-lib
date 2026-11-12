@@ -10,6 +10,8 @@ use OpenTelemetry\API\Trace\SpanKind;
 use OpenTelemetry\API\Trace\StatusCode;
 use OpenTelemetry\Context\ScopeInterface;
 use Throwable;
+use Zharp\Internal\Bodies;
+use Zharp\Internal\BodySettings;
 
 /**
  * The SERVER span of one incoming request, for framework integrations: continues the caller's
@@ -29,6 +31,7 @@ final class RequestSpan
         private readonly SpanInterface $span,
         private readonly ScopeInterface $scope,
         private readonly string $method,
+        private readonly string $url = '',
     ) {
     }
 
@@ -75,8 +78,9 @@ final class RequestSpan
             ->startSpan();
         // The extracted context holds the baggage: logs during the request read it from here.
         $scope = $span->storeInContext($parent)->activate();
+        $url = $scheme . '://' . $host . ($port !== null ? ':' . $port : '') . $path . ($query !== null && $query !== '' ? '?' . $query : '');
 
-        return new self($span, $scope, $method);
+        return new self($span, $scope, $method, $url);
     }
 
     public function span(): SpanInterface
@@ -103,7 +107,14 @@ final class RequestSpan
         }
     }
 
-    public function end(int $statusCode): void
+    /**
+     * Ends the span. $bodies, when capture_bodies is on, gives the request and response bodies'
+     * attributes; it is called only when this request's bodies are wanted (by default: status 400
+     * and above) and its URL is allowed.
+     *
+     * @param (callable(BodySettings): array<string, mixed>)|null $bodies
+     */
+    public function end(int $statusCode, ?callable $bodies = null): void
     {
         if ($this->ended) {
             return;
@@ -111,6 +122,14 @@ final class RequestSpan
         $this->ended = true;
         if ($statusCode > 0) {
             $this->span->setAttribute('http.response.status_code', $statusCode);
+        }
+        $settings = Zharp::bodySettings();
+        if ($bodies !== null && $settings !== null && Bodies::wanted($settings, $statusCode) && $settings->allows($this->url)) {
+            try {
+                $this->span->setAttributes($bodies($settings));
+            } catch (Throwable) {
+                // Never let telemetry break a request.
+            }
         }
         if ($statusCode >= 500 && !$this->failed) {
             $this->span->setStatus(StatusCode::STATUS_ERROR);

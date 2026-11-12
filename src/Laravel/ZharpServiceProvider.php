@@ -42,6 +42,7 @@ class ZharpServiceProvider extends ServiceProvider
             'endpoint' => $config['endpoint'] ?? null,
             'sample_rate' => $config['sample_rate'] ?? null,
             'tracing' => $config['tracing'] ?? null,
+            'capture_bodies' => $config['capture_bodies'] ?? null,
             // Laravel's exception handler reports uncaught exceptions; Zharp listens there.
             'capture_uncaught' => false,
             'quiet' => true,

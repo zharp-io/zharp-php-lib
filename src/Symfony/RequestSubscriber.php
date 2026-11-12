@@ -11,6 +11,8 @@ use Symfony\Component\HttpKernel\Event\ResponseEvent;
 use Symfony\Component\HttpKernel\Event\TerminateEvent;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Symfony\Component\HttpKernel\KernelEvents;
+use Zharp\Internal\BodySettings;
+use Zharp\Internal\HttpFoundationBodies;
 use Zharp\RequestSpan;
 use Zharp\Zharp;
 
@@ -89,14 +91,17 @@ final class RequestSubscriber implements EventSubscriberInterface
         if ($this->status === 0) {
             $this->status = $event->getResponse()->getStatusCode();
         }
-        $this->finish();
+        $request = $event->getRequest();
+        $response = $event->getResponse();
+        $this->finish(static fn (BodySettings $settings): array => HttpFoundationBodies::attributes($request, $response, $settings));
         Zharp::flush();
     }
 
-    private function finish(): void
+    /** @param (callable(BodySettings): array<string, mixed>)|null $bodies */
+    private function finish(?callable $bodies = null): void
     {
         if ($this->span !== null) {
-            $this->span->end($this->status);
+            $this->span->end($this->status, $bodies);
             $this->span = null;
         }
         Zharp::clearUser();

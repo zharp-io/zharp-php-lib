@@ -21,6 +21,13 @@ return [
     // made or sent and no traceparent is added to outgoing requests.
     'tracing' => env('ZHARP_TRACING', true),
 
+    // Request and response bodies on the request's span: false (default), 'errors' (requests that
+    // answered 400 and above) or 'all'; or ['mode' => 'all', 'max_size' => 65536,
+    // 'redact_keys' => ['date_of_birth'], 'urls' => ['/\/api\//']]. Field names are kept; values
+    // under secret-looking keys (password, token, card, …) are sent as [Filtered]; uploaded files
+    // are described (name, type, size), never sent. Text is capped at 32 KB (128 KB at most).
+    'capture_bodies' => env('ZHARP_CAPTURE_BODIES', false),
+
     // Trace every HTTP request (a SERVER span each).
     'trace_requests' => env('ZHARP_TRACE_REQUESTS', true),
 

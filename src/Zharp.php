@@ -42,7 +42,9 @@ use OpenTelemetry\SDK\Trace\TracerProvider;
 use Throwable;
 use WeakMap;
 use Zharp\Internal\ContextLogProcessor;
+use Zharp\Internal\BodySettings;
 use Zharp\Internal\ContextSpanProcessor;
+use Zharp\Internal\UrlRedactionSpanProcessor;
 use Zharp\Internal\Exceptions;
 use Zharp\Internal\Values;
 
@@ -151,7 +153,7 @@ final class Zharp
                 $spanProcessor = new BatchSpanProcessor(new SpanExporter($transport), $clock);
             }
             $tracerProvider = new TracerProvider(
-                [new ContextSpanProcessor(), $spanProcessor],
+                [new ContextSpanProcessor(), new UrlRedactionSpanProcessor(), $spanProcessor],
                 new ParentBased(new TraceIdRatioBasedSampler($config->sampleRate)),
                 $resource,
             );
@@ -222,6 +224,17 @@ final class Zharp
     }
 
     /** Whether spans are made and sent (false with tracing => false / ZHARP_TRACING=false). */
+    /**
+     * `capture_bodies` (ZHARP_CAPTURE_BODIES) as resolved, or null when request and response
+     * bodies are not captured (the default), tracing is off, or Zharp isn't running.
+     *
+     * @internal
+     */
+    public static function bodySettings(): ?BodySettings
+    {
+        return self::$config !== null && self::$config->tracing ? self::$config->bodies : null;
+    }
+
     public static function isTracing(): bool
     {
         return self::$config !== null && self::$config->tracing;

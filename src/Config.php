@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Zharp;
 
+use Zharp\Internal\Bodies;
+use Zharp\Internal\BodySettings;
+
 /**
  * Zharp's settings: options passed to Zharp::init() first, then ZHARP_* environment variables.
  *
@@ -22,6 +25,7 @@ final class Config
         public readonly float $sampleRate,
         public readonly bool $captureUncaught,
         public readonly bool $tracing,
+        public readonly ?BodySettings $bodies,
     ) {
     }
 
@@ -46,6 +50,7 @@ final class Config
             ($rate > 0.0 && $rate <= 1.0) ? $rate : 1.0,
             (bool) ($options['capture_uncaught'] ?? true),
             self::flag($options['tracing'] ?? self::env('ZHARP_TRACING'), true),
+            Bodies::settings($options['capture_bodies'] ?? null, self::env('ZHARP_CAPTURE_BODIES')),
         );
     }
 

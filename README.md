@@ -85,6 +85,33 @@ propagator, so nothing adds `traceparent`/`baggage` to outgoing requests. An inc
 `traceparent` and `baggage` are still read by the Laravel middleware / Symfony subscriber, so a
 request's logs and errors keep the caller's trace id, user and session.
 
+## Request and response bodies
+
+Off by default. Turn it on to see what a request sent and what came back, on its span:
+
+```php
+Zharp\Zharp::init(['key' => 'zpk_…', 'capture_bodies' => 'errors']); // requests that answered 400+; 'all' for every request
+// or ZHARP_CAPTURE_BODIES=errors in .env (Laravel: config/zharp.php 'capture_bodies'), or:
+'capture_bodies' => ['mode' => 'all', 'max_size' => 65536, 'redact_keys' => ['date_of_birth', '/^acct/'], 'urls' => ['#/api/#']],
+```
+
+- Laravel and Symfony request spans carry `http.request.body` and `http.response.body` (with
+  their content types). Text is kept up to 32 KB (`max_size`, 128 KB at most).
+- Every field name is kept. Values under keys that look secret — `password`, `pwd`, `token`,
+  `secret`, `api_key`, `authorization`, `cookie`, `card`, `cvv`, `ssn` and similar — are sent as
+  `[Filtered]`; under a secret object such as `card`, each value inside is filtered and its keys
+  kept. Anything else (names, emails) is sent as it is: add those keys to `redact_keys` (a
+  delimited regex like `'/^acct/'` is matched against keys as they are).
+- File uploads list their text fields and each file as `[file photo.png · image/png · 240 KB]` —
+  file contents are never read. Inline images and long base64 values become
+  `[image/png · 24 KB]`; binary, file and streamed responses `[binary · application/pdf · 1.2 MB]`
+  or `[event stream]`. Gzipped responses are inflated first.
+- `urls` limits which requests: a host, a URL prefix, or a delimited regex tested against the URL.
+- What your app reads and sends is never changed.
+
+Whether or not bodies are on, secret-looking query values (`?token=`, `key`, `sig`, `password`, …)
+are recorded as `[Filtered]` in `url.full` / `url.query` on every span.
+
 ## Database and HTTP client spans
 
 PHP needs the [`opentelemetry` extension](https://opentelemetry.io/docs/zero-code/php/) for
@@ -105,6 +132,7 @@ traced by Zharp's middleware / subscriber.
 | `sample_rate` | `ZHARP_SAMPLE_RATE` | `1.0` (share of traces kept; logs and errors always sent) |
 | — | `ZHARP_LOG_LEVEL` | `info` (`off` sends no framework logs) |
 | `tracing` | `ZHARP_TRACING` | `true` (`false` = logs only) |
+| `capture_bodies` | `ZHARP_CAPTURE_BODIES` | off (`errors`, `all` or options — see [Request and response bodies](#request-and-response-bodies)) |
 | `capture_uncaught` | — | `true` (the framework integrations use the framework's handler instead) |
 
 `ZHARP_DISABLED=true` turns it off. Zharp never throws into your app.

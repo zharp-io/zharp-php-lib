@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- `capture_bodies` (`ZHARP_CAPTURE_BODIES`), off by default: request and response bodies on the
+  Laravel and Symfony request spans (`http.request.body`, `http.response.body`, their content
+  types and `.truncated`) — `errors` (400 and above) or `all`. Same rules as every Zharp SDK:
+  field names kept, secret values `[Filtered]` (secret objects keep their keys), uploads as fields
+  plus `[file name · type · size]`, inline images and binary/streamed responses described, 32 KB
+  default (128 KB max), `redact_keys` and `urls`.
+- Secret-looking query values are `[Filtered]` in `url.full` / `url.query` on every span, with or
+  without `capture_bodies`.
+
 ## v0.2.0 (`zharp/zharp`)
 
 - First `zharp/zharp` release of Zharp Application Monitoring for PHP, on OpenTelemetry: `Zharp::init()` sets up

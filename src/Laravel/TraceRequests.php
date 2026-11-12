@@ -9,6 +9,8 @@ use Illuminate\Http\Request;
 use Illuminate\Routing\Route;
 use Symfony\Component\HttpFoundation\Response;
 use Throwable;
+use Zharp\Internal\BodySettings;
+use Zharp\Internal\HttpFoundationBodies;
 use Zharp\RequestSpan;
 use Zharp\Zharp;
 
@@ -49,15 +51,15 @@ final class TraceRequests
         } catch (Throwable $e) {
             // Laravel turns exceptions into responses inside the pipeline; this is the rare escape.
             $span?->recordException($e);
-            $this->finish($request, 500);
+            $this->finish($request, 500, null);
             throw $e;
         }
-        $this->finish($request, $response instanceof Response ? $response->getStatusCode() : 200);
+        $this->finish($request, $response instanceof Response ? $response->getStatusCode() : 200, $response instanceof Response ? $response : null);
 
         return $response;
     }
 
-    private function finish(Request $request, int $status): void
+    private function finish(Request $request, int $status, ?Response $response): void
     {
         $span = self::$current;
         self::$current = null;
@@ -71,7 +73,7 @@ final class TraceRequests
             }
         } catch (Throwable) {
         }
-        $span->end($status);
+        $span->end($status, static fn (BodySettings $settings): array => HttpFoundationBodies::attributes($request, $response, $settings));
         Zharp::clearUser();
     }
 }
