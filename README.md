@@ -85,6 +85,33 @@ propagator, so nothing adds `traceparent`/`baggage` to outgoing requests. An inc
 `traceparent` and `baggage` are still read by the Laravel middleware / Symfony subscriber, so a
 request's logs and errors keep the caller's trace id, user and session.
 
+## Everything your app prints
+
+Logs reach Zharp however they are written, each with the trace it was written in:
+
+| Where | What is sent |
+|---|---|
+| Everywhere | `Zharp::info()` & co, Monolog (`ZharpHandler`; every channel in Symfony), Laravel's `Log` (every channel and stack), and in plain PHP the warnings, notices and deprecations PHP raises (`error_reporting()` decides; `@` silences; your own error handler still runs). |
+| CLI only — queue workers, `artisan` and `bin/console` commands, scripts, Octane / Swoole / RoadRunner workers | What the process prints: `echo`, `print`, `printf`, `var_dump`, warnings shown with `display_errors`, and a console command's output (`$this->info()`, `$output->writeln()`, the queue worker's job lines). |
+
+What the process prints is read line by line: colour codes are dropped, a line is capped at 32 KB,
+and its level comes from the line — a JSON record's `level`/`level_name`, Monolog's
+`local.ERROR:` format, PHP's `Warning:` / `Fatal error:`, or a word such as `ERROR`, `[warn]`,
+`level=error` — else `info` for stdout and `warn` for stderr. Each line is sent once: one that a
+logger above already sent (Monolog writing to `php://output`, Symfony's console handler, a
+displayed PHP warning) is recognised and skipped. Output itself is never changed.
+
+Why the CLI only: under PHP-FPM, Apache, FrankenPHP or `php -S`, PHP's output *is* the HTTP
+response, and a response is never sent as logs. (Octane buffers each request's output into its
+response, so that stays out too.) Also left alone: `fwrite(STDOUT/STDERR, …)` on PHP's own
+`STDOUT`/`STDERR` constants — a stream PHP is watching can no longer be handed to `proc_open` or
+checked with `posix_isatty`, so tapping them could break your app — and `error_log()` calls, which
+PHP writes below anything a library can see. Log those through Monolog or `Zharp::log()`.
+
+Printed lines are sent with the next log, at `Zharp::flush()` (after every Laravel job, response
+and command) or when the script ends. Turn it off with `'capture_output' => false`, or
+`ZHARP_CAPTURE_OUTPUT=false` (Laravel: `config/zharp.php` `capture_output`).
+
 ## Request and response bodies
 
 Off by default. Turn it on to see what a request sent and what came back, on its span:
@@ -133,6 +160,7 @@ traced by Zharp's middleware / subscriber.
 | — | `ZHARP_LOG_LEVEL` | `info` (`off` sends no framework logs) |
 | `tracing` | `ZHARP_TRACING` | `true` (`false` = logs only) |
 | `capture_bodies` | `ZHARP_CAPTURE_BODIES` | off (`errors`, `all` or options — see [Request and response bodies](#request-and-response-bodies)) |
+| `capture_output` | `ZHARP_CAPTURE_OUTPUT` | `true` — PHP warnings (plain PHP) and, in the CLI, what the process prints; see [Everything your app prints](#everything-your-app-prints) |
 | `capture_uncaught` | — | `true` (the framework integrations use the framework's handler instead) |
 
 `ZHARP_DISABLED=true` turns it off. Zharp never throws into your app.

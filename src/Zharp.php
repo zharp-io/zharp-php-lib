@@ -46,6 +46,10 @@ use Zharp\Internal\BodySettings;
 use Zharp\Internal\ContextSpanProcessor;
 use Zharp\Internal\UrlRedactionSpanProcessor;
 use Zharp\Internal\Exceptions;
+use Zharp\Internal\OutputCapture;
+use Zharp\Internal\PhpErrors;
+use Zharp\Internal\SentLineProcessor;
+use Zharp\Internal\SentLines;
 use Zharp\Internal\Values;
 
 /**
@@ -97,7 +101,9 @@ final class Zharp
      * (ZHARP_RELEASE), endpoint (ZHARP_ENDPOINT), sample_rate (ZHARP_SAMPLE_RATE, 1.0),
      * capture_uncaught (true: an uncaught exception or fatal error is reported), tracing
      * (ZHARP_TRACING, true; false = logs only: logs, errors and context still go out, but no
-     * spans are made or sent and OpenTelemetry instrumentation gets no tracer or propagator).
+     * spans are made or sent and OpenTelemetry instrumentation gets no tracer or propagator),
+     * capture_output (ZHARP_CAPTURE_OUTPUT, true: PHP warnings, notices and deprecations, and in
+     * the CLI whatever the process prints, are sent as logs — see OutputCapture).
      * For tests: span_exporter / log_exporter replace OTLP and export synchronously.
      * ZHARP_DISABLED=true turns it off. Returns whether it started.
      *
@@ -167,6 +173,7 @@ final class Zharp
 
         $loggerProvider = LoggerProvider::builder()
             ->setResource($resource)
+            ->addLogRecordProcessor(new SentLineProcessor())
             ->addLogRecordProcessor(new ContextLogProcessor())
             ->addLogRecordProcessor($logProcessor)
             ->build();
@@ -216,6 +223,14 @@ final class Zharp
                 exit(255);
             });
         }
+        if ($config->captureOutput) {
+            // Laravel and Symfony (capture_uncaught off) turn PHP warnings into logs and
+            // exceptions themselves; Zharp receives those.
+            if ($config->captureUncaught) {
+                PhpErrors::install();
+            }
+            OutputCapture::start();
+        }
     }
 
     public static function isActive(): bool
@@ -233,6 +248,12 @@ final class Zharp
     public static function bodySettings(): ?BodySettings
     {
         return self::$config !== null && self::$config->tracing ? self::$config->bodies : null;
+    }
+
+    /** @internal Whether capture_output is on (and Zharp running). */
+    public static function capturesOutput(): bool
+    {
+        return self::$config !== null && self::$config->captureOutput;
     }
 
     public static function isTracing(): bool
@@ -316,6 +337,33 @@ final class Zharp
             );
         } catch (Throwable) {
             // never into the app
+        }
+        // Printed lines waiting to go: after this record, so one that repeats it is recognised.
+        OutputCapture::drain();
+    }
+
+    /**
+     * A line the output capture read: sent in the context it was printed in.
+     *
+     * @internal
+     * @param array<string, bool|int|float|string> $attributes
+     */
+    public static function emitLine(int $severity, string $severityText, string $body, array $attributes, ContextInterface $context, int $timestamp): void
+    {
+        $logger = self::$logger;
+        if ($logger === null) {
+            return;
+        }
+        try {
+            SentLines::quiet(static fn () => $logger->emit(
+                (new LogRecord($body))
+                    ->setTimestamp($timestamp)
+                    ->setSeverityNumber($severity)
+                    ->setSeverityText($severityText)
+                    ->setAttributes($attributes)
+                    ->setContext($context)
+            ));
+        } catch (Throwable) {
         }
     }
 
@@ -498,8 +546,11 @@ final class Zharp
     {
         $ok = true;
         try {
-            $ok = (self::$tracerProvider?->forceFlush() ?? true) && $ok;
-            $ok = (self::$loggerProvider?->forceFlush() ?? true) && $ok;
+            OutputCapture::drain();
+            SentLines::quiet(static function () use (&$ok): void {
+                $ok = (self::$tracerProvider?->forceFlush() ?? true) && $ok;
+                $ok = (self::$loggerProvider?->forceFlush() ?? true) && $ok;
+            });
         } catch (Throwable) {
             return false;
         }
@@ -511,8 +562,12 @@ final class Zharp
     public static function shutdown(): void
     {
         try {
-            self::$tracerProvider?->shutdown();
-            self::$loggerProvider?->shutdown();
+            PhpErrors::uninstall();
+            OutputCapture::stop();
+            SentLines::quiet(static function (): void {
+                self::$tracerProvider?->shutdown();
+                self::$loggerProvider?->shutdown();
+            });
         } catch (Throwable) {
         }
         self::$config = null;
@@ -526,6 +581,8 @@ final class Zharp
     public static function resetForTests(): void
     {
         self::shutdown();
+        OutputCapture::reset();
+        SentLines::reset();
         self::$user = null;
         self::$tags = [];
         self::$reported = null;

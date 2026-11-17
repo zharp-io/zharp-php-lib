@@ -26,6 +26,7 @@ final class Config
         public readonly bool $captureUncaught,
         public readonly bool $tracing,
         public readonly ?BodySettings $bodies,
+        public readonly bool $captureOutput,
     ) {
     }
 
@@ -51,6 +52,7 @@ final class Config
             (bool) ($options['capture_uncaught'] ?? true),
             self::flag($options['tracing'] ?? self::env('ZHARP_TRACING'), true),
             Bodies::settings($options['capture_bodies'] ?? null, self::env('ZHARP_CAPTURE_BODIES')),
+            self::flag($options['capture_output'] ?? self::env('ZHARP_CAPTURE_OUTPUT'), true),
         );
     }
 

@@ -33,4 +33,10 @@ return [
 
     // Send what Laravel logs, from this level up; false to send none.
     'log_level' => env('ZHARP_LOG_LEVEL', 'info'),
+
+    // In queue workers, artisan commands and Octane/Swoole/RoadRunner workers, also send what the
+    // process prints (echo, print, var_dump, a command's output), each line with the trace it was
+    // printed in and its level read from the line. Never the HTTP response, and never a line
+    // Laravel's log already sent. false to turn it off.
+    'capture_output' => env('ZHARP_CAPTURE_OUTPUT', true),
 ];

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- `capture_output` (`ZHARP_CAPTURE_OUTPUT`), on by default: logs arrive however they are written.
+  In plain PHP, PHP's warnings, notices and deprecations are sent (chaining the error handler set
+  before; `error_reporting()` and `@` respected). In the CLI — queue workers, artisan and
+  bin/console commands, scripts, Octane/Swoole/RoadRunner workers — what the process prints
+  (`echo`, `print`, `var_dump`, displayed warnings, a console command's output) is sent line by
+  line with the trace it was printed in; the level is read from the line (JSON `level`, Monolog's
+  `local.ERROR:`, PHP's `Warning:`, a word like `ERROR` or `[warn]`), else info for stdout and warn
+  for stderr; colour codes stripped, 32 KB per line. A line a logger already sent is not sent
+  again. Never under PHP-FPM/Apache/FrankenPHP/`php -S`, where the output is the HTTP response.
+
 ## v0.3.0 (`zharp/zharp`)
 
 - `capture_bodies` (`ZHARP_CAPTURE_BODIES`), off by default: request and response bodies on the

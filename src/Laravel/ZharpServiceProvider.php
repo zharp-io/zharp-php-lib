@@ -9,6 +9,7 @@ use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\ServiceProvider;
 use Throwable;
+use Zharp\Internal\OutputCapture;
 use Zharp\Zharp;
 
 /**
@@ -18,6 +19,8 @@ use Zharp\Zharp;
  * - every HTTP request gets a SERVER span (the TraceRequests global middleware);
  * - exceptions Laravel reports become unhandled Zharp errors, with the request's trace;
  * - everything Laravel logs (info and up by default) is sent with the trace, user and session;
+ * - in queue workers, artisan and Octane workers, what the process prints (echo, a command's
+ *   output) is sent too, once (capture_output / ZHARP_CAPTURE_OUTPUT);
  * - telemetry is sent once each response is out, and after every queue job.
  */
 class ZharpServiceProvider extends ServiceProvider
@@ -43,6 +46,7 @@ class ZharpServiceProvider extends ServiceProvider
             'sample_rate' => $config['sample_rate'] ?? null,
             'tracing' => $config['tracing'] ?? null,
             'capture_bodies' => $config['capture_bodies'] ?? null,
+            'capture_output' => $config['capture_output'] ?? null,
             // Laravel's exception handler reports uncaught exceptions; Zharp listens there.
             'capture_uncaught' => false,
             'quiet' => true,
@@ -58,7 +62,19 @@ class ZharpServiceProvider extends ServiceProvider
         }
         $this->reportExceptions();
         $this->bridgeLogs($config['log_level'] ?? 'info');
+        $this->captureCommandOutput();
         $this->flushAfterWork();
+    }
+
+    /** What an artisan command prints ($this->info(), the queue worker's job lines …). */
+    private function captureCommandOutput(): void
+    {
+        if (!Zharp::capturesOutput() || !$this->app->runningInConsole()) {
+            return;
+        }
+        $this->app['events']->listen('Illuminate\Console\Events\CommandStarting', static function ($event): void {
+            OutputCapture::tapConsole(is_object($event) ? ($event->output ?? null) : null);
+        });
     }
 
     private function traceRequests(): void

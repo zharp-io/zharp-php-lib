@@ -20,7 +20,8 @@ use Zharp\Zharp;
  *
  * Every main request gets a SERVER span (RequestSubscriber); an exception that escapes a
  * controller is an unhandled Zharp error; with MonologBundle, every channel's logs are sent
- * (ZHARP_LOG_LEVEL, info by default) with the trace, user and session.
+ * (ZHARP_LOG_LEVEL, info by default) with the trace, user and session; and what console commands
+ * print is sent too (ZHARP_CAPTURE_OUTPUT).
  */
 final class ZharpBundle extends Bundle implements CompilerPassInterface
 {
@@ -28,6 +29,11 @@ final class ZharpBundle extends Bundle implements CompilerPassInterface
     {
         $container->register(RequestSubscriber::class, RequestSubscriber::class)
             ->addTag('kernel.event_subscriber');
+        // What console commands print (bin/console, messenger:consume …), with symfony/console.
+        if (class_exists('Symfony\Component\Console\ConsoleEvents')) {
+            $container->register(ConsoleSubscriber::class, ConsoleSubscriber::class)
+                ->addTag('kernel.event_subscriber');
+        }
         $container->register('zharp.monolog_handler', ZharpHandler::class)
             ->setFactory([ZharpHandler::class, 'fromEnvironment']);
         // After MonologBundle has defined its loggers, before child definitions are resolved.
