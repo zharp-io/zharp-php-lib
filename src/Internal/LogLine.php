@@ -142,6 +142,28 @@ final class LogLine
         return implode("\n", $parts);
     }
 
+    /**
+     * One formatted record, stamped once at the end of its last line: a multi-line record (a stack
+     * trace) is joined into one entry by the agent, which reads the stamp at the end of the entry.
+     * Trailing newlines stay after the stamp.
+     */
+    public static function stampRecord(string $record, string $traceId, string $spanId): string
+    {
+        $body = rtrim($record, "\r\n");
+        $after = substr($record, strlen($body));
+        $trimmed = rtrim($body);
+        if (trim($trimmed) === '' || str_contains($body, 'trace_id') || str_contains($body, '[Zharp]')) {
+            return $record;
+        }
+        // A whole JSON record gets fields; anything else (a text record whose context JSON ends
+        // its last line, too) gets the suffix.
+        if (str_starts_with(ltrim($trimmed), '{') && str_ends_with($trimmed, '}') && is_array(json_decode($trimmed, true))) {
+            return self::stamp($body, $traceId, $spanId) . $after;
+        }
+
+        return $trimmed . ' trace_id=' . $traceId . ' span_id=' . $spanId . substr($body, strlen($trimmed)) . $after;
+    }
+
     /** One line, stamped (see stampText). */
     public static function stamp(string $line, string $traceId, string $spanId): string
     {

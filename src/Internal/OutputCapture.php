@@ -202,10 +202,13 @@ final class OutputCapture
         return self::stamped($data);
     }
 
-    /** Complete lines in a write, with the active span's ids when there is one. */
+    /**
+     * Complete lines in a write, with the active span's ids when there is one. A write that carries
+     * a trace_id already is a record stamped once at its end (a Monolog stack trace): left whole.
+     */
     private static function stamped(string $text): string
     {
-        if (!self::$stamp || !str_contains($text, "\n")) {
+        if (!self::$stamp || !str_contains($text, "\n") || str_contains($text, 'trace_id')) {
             return $text;
         }
         $ids = LogLine::activeIds();

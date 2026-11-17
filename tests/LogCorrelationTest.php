@@ -176,6 +176,29 @@ final class LogCorrelationTest extends TestCase
         self::assertSame([], $this->bodies());
     }
 
+    public function testAMultiLineRecordIsStampedOnceAtItsEnd(): void
+    {
+        $this->start();
+        $formatter = new \Monolog\Formatter\LineFormatter(null, null, true, true);
+        $formatter->includeStacktraces(true);
+        [$logger, $stream] = self::logger($formatter);
+        // Printed through a tapped stream too: the record's inner lines are not stamped there either.
+        self::assertTrue(OutputCapture::tapStream($stream, 'stderr'));
+        $ids = self::inRequest(static function () use ($logger): void {
+            $logger->error('payment failed', ['exception' => new RuntimeException('gateway down')]);
+        });
+        rewind($stream);
+        $record = rtrim((string) stream_get_contents($stream), "\n");
+
+        self::assertGreaterThan(2, substr_count($record, "\n"), 'a stack trace spans lines');
+        self::assertStringContainsString('#0 ', $record);
+        self::assertSame(1, substr_count($record, 'trace_id='));
+        self::assertSame(1, preg_match(self::BACKEND, $record, $m));
+        self::assertSame($ids, [$m[1], $m[2]]);
+        // At the very end (LineFormatter's trailing space stays after it, as the backend allows).
+        self::assertStringEndsWith(' trace_id=' . $ids[0] . ' span_id=' . $ids[1], rtrim($record));
+    }
+
     public function testAJsonRecordGetsFields(): void
     {
         $this->start();
@@ -255,6 +278,7 @@ final class LogCorrelationTest extends TestCase
         self::assertSame('[Zharp] sdk', LogLine::stamp('[Zharp] sdk', $t, $s));
         self::assertSame("a trace_id={$t} span_id={$s}\nb", LogLine::stampText("a\nb", $t, $s));
         self::assertSame("a trace_id={$t} span_id={$s}\nb trace_id={$t} span_id={$s}", LogLine::stampText("a\nb", $t, $s, true));
+        self::assertSame("a\n#0 b trace_id={$t} span_id={$s}\n", LogLine::stampRecord("a\n#0 b\n", $t, $s));
         // A captured line's body drops the stamp.
         self::assertSame('placed', LogLine::parse("[2026-11-17 08:33:00] local.INFO: placed trace_id={$t} span_id={$s}")['body']);
     }
