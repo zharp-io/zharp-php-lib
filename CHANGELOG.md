@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 (`zharp/zharp`) — 2026-11-17
+
+**Behaviour change:** logs are no longer sent unless `logs` / `ZHARP_LOGS` is on. Errors, traces
+and `Zharp::log()` calls are still sent; run the Zharp agent (lines are linked to their request
+by the new stamp), or set `ZHARP_LOGS=true` where there is no agent.
 
 - Logs are off by default: `logs` (`ZHARP_LOGS=true`) sends what the app logs and prints. Where
   the Zharp agent reads the app's output it already brings those lines in; sending them from the

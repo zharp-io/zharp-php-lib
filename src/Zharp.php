@@ -62,7 +62,7 @@ use Zharp\Internal\Values;
  */
 final class Zharp
 {
-    public const VERSION = '0.3.0';
+    public const VERSION = '0.4.0';
 
     private const SCOPE = 'zharp/zharp';
 
