@@ -25,13 +25,12 @@ Nothing to register — the service provider is auto-discovered. In `.env`:
 ZHARP_KEY=zpk_…
 ZHARP_SERVICE=checkout-api
 ZHARP_ENVIRONMENT=production
-# ZHARP_ENDPOINT=…   optional
 ```
 
 Every HTTP request gets a SERVER span named by its route (`GET /orders/{id}`), continuing the
-caller's trace. Exceptions Laravel reports become unhandled Zharp errors with the request's trace;
-everything Laravel logs (`info` and up, `ZHARP_LOG_LEVEL` to change) is sent with the trace, user
-and session. Telemetry goes once the response is out, and after every queue job.
+caller's trace. Exceptions Laravel reports become unhandled Zharp errors with the request's trace.
+Every line Laravel's log channels write during a request ends with its `trace_id` and `span_id`
+(see [Logs](#logs)). Telemetry goes once the response is out, and after every queue job.
 `php artisan vendor:publish --tag=zharp-config` publishes `config/zharp.php`.
 
 ## Symfony
@@ -44,7 +43,7 @@ Zharp\Symfony\ZharpBundle::class => ['all' => true],
 
 Every main request gets a SERVER span (named by the route name), an exception that escapes a
 controller is an unhandled error (4xx `HttpException`s aren't), and with MonologBundle every
-channel's logs are sent.
+channel's lines written during a request carry its ids (see [Logs](#logs)).
 
 ## Plain PHP
 
@@ -53,7 +52,9 @@ Zharp\Zharp::init(['key' => 'zpk_…', 'service' => 'checkout-api', 'environment
 ```
 
 An uncaught exception or fatal error is reported; `Zharp\RequestSpan::start(...)` makes a request
-span for frameworks without an integration. Monolog: `$logger->pushHandler(new Zharp\Monolog\ZharpHandler('info'))`.
+span for frameworks without an integration. Monolog: `Zharp\Monolog\LogStamping::apply($logger)`
+puts the request's ids on its lines; with logs on, `$logger->pushHandler(new Zharp\Monolog\ZharpHandler('info'))`
+sends them too.
 
 ## API
 
@@ -71,9 +72,9 @@ Zharp::flush();                                          // send now
 A browser or mobile app using a Zharp SDK sends `traceparent` and `baggage` (`enduser.id`,
 `session.id`) with its API calls; the request's span and logs carry them with no code.
 
-## Logs only
+## No tracing
 
-Logs, errors, user/session and tags without any tracing:
+Errors (and logs, when on), user/session and tags without any tracing:
 
 ```php
 Zharp\Zharp::init(['key' => 'zpk_…', 'service' => 'checkout-api', 'tracing' => false]);
@@ -85,32 +86,52 @@ propagator, so nothing adds `traceparent`/`baggage` to outgoing requests. An inc
 `traceparent` and `baggage` are still read by the Laravel middleware / Symfony subscriber, so a
 request's logs and errors keep the caller's trace id, user and session.
 
-## Everything your app prints
+## Logs
 
-Logs reach Zharp however they are written, each with the trace it was written in:
+**How logs reach Zharp.** Run the Zharp agent where the app runs and let the app log to its
+output or files — in containers, log to stderr (Laravel: `LOG_CHANNEL=stderr`). The agent brings
+the lines in. The SDK's part is the stamp: every line written while a request is being handled
+ends with that request's ids,
+
+```text
+[2026-11-17 08:33:00] production.ERROR: Card declined {"order":7} [] trace_id=4bf92f3577b34da6a3ce929d0e0e4736 span_id=00f067aa0ba902b7
+```
+
+and a JSON line (Monolog's `JsonFormatter`) gets `"trace_id"` and `"span_id"` fields instead, so
+Zharp shows each line with its request. Laravel's log channels (stacks included) and Symfony's
+Monolog loggers are stamped with no code; for a Monolog logger of your own call
+`Zharp\Monolog\LogStamping::apply($logger)`. In CLI processes (see below) what is printed during a
+span is stamped too. Lines outside a request, and lines that already carry a `trace_id`, are left
+as they are. `'log_correlation' => false` / `ZHARP_LOG_CORRELATION=false` turns the stamp off.
+
+**No agent?** (Serverless, managed hosts.) Turn on `'logs' => true` / `ZHARP_LOGS=true` and the SDK
+sends the logs itself. It is off by default because, with the agent also reading the output, every
+line would arrive twice. Errors (exceptions and fatal errors), traces and your own `Zharp::info()`
+& co calls are sent either way; with logs off, a Monolog/Laravel log call that carries an
+`exception` still reports that exception (once).
+
+With logs on, Zharp sends:
 
 | Where | What is sent |
 |---|---|
-| Everywhere | `Zharp::info()` & co, Monolog (`ZharpHandler`; every channel in Symfony), Laravel's `Log` (every channel and stack), and in plain PHP the warnings, notices and deprecations PHP raises (`error_reporting()` decides; `@` silences; your own error handler still runs). |
-| CLI only — queue workers, `artisan` and `bin/console` commands, scripts, Octane / Swoole / RoadRunner workers | What the process prints: `echo`, `print`, `printf`, `var_dump`, warnings shown with `display_errors`, and a console command's output (`$this->info()`, `$output->writeln()`, the queue worker's job lines). |
+| Everywhere | Monolog (`ZharpHandler`; every channel in Symfony), Laravel's `Log` (every channel and stack; `info` and up, `ZHARP_LOG_LEVEL` to change), and in plain PHP the warnings, notices and deprecations PHP raises (`error_reporting()` decides; `@` silences; your own error handler still runs). |
+| CLI only — queue workers, `artisan` and `bin/console` commands, scripts, Octane / Swoole / RoadRunner workers | What the process prints (`capture_output`, on): `echo`, `print`, `printf`, `var_dump`, warnings shown with `display_errors`, and a console command's output (`$this->info()`, `$output->writeln()`, the queue worker's job lines). |
 
 What the process prints is read line by line: colour codes are dropped, a line is capped at 32 KB,
 and its level comes from the line — a JSON record's `level`/`level_name`, Monolog's
 `local.ERROR:` format, PHP's `Warning:` / `Fatal error:`, or a word such as `ERROR`, `[warn]`,
 `level=error` — else `info` for stdout and `warn` for stderr. Each line is sent once: one that a
 logger above already sent (Monolog writing to `php://output`, Symfony's console handler, a
-displayed PHP warning) is recognised and skipped. Output itself is never changed.
+displayed PHP warning) is recognised and skipped. Printed lines are sent with the next log, at
+`Zharp::flush()` (after every Laravel job, response and command) or when the script ends.
+`'capture_output' => false` / `ZHARP_CAPTURE_OUTPUT=false` keeps the other logs but not this.
 
 Why the CLI only: under PHP-FPM, Apache, FrankenPHP or `php -S`, PHP's output *is* the HTTP
-response, and a response is never sent as logs. (Octane buffers each request's output into its
+response — never read as logs, never stamped. (Octane buffers each request's output into its
 response, so that stays out too.) Also left alone: `fwrite(STDOUT/STDERR, …)` on PHP's own
 `STDOUT`/`STDERR` constants — a stream PHP is watching can no longer be handed to `proc_open` or
 checked with `posix_isatty`, so tapping them could break your app — and `error_log()` calls, which
-PHP writes below anything a library can see. Log those through Monolog or `Zharp::log()`.
-
-Printed lines are sent with the next log, at `Zharp::flush()` (after every Laravel job, response
-and command) or when the script ends. Turn it off with `'capture_output' => false`, or
-`ZHARP_CAPTURE_OUTPUT=false` (Laravel: `config/zharp.php` `capture_output`).
+PHP writes below anything a library can see. Log those through Monolog.
 
 ## Request and response bodies
 
@@ -155,12 +176,13 @@ traced by Zharp's middleware / subscriber.
 | `service` | `ZHARP_SERVICE`, `OTEL_SERVICE_NAME` | `APP_NAME` in Laravel, else `unknown-service` |
 | `environment` | `ZHARP_ENVIRONMENT` | `APP_ENV` in Laravel |
 | `release` | `ZHARP_RELEASE` | none |
-| `endpoint` | `ZHARP_ENDPOINT` | `https://api.zharp.io/api/v1/otlp` |
-| `sample_rate` | `ZHARP_SAMPLE_RATE` | `1.0` (share of traces kept; logs and errors always sent) |
-| — | `ZHARP_LOG_LEVEL` | `info` (`off` sends no framework logs) |
+| `sample_rate` | `ZHARP_SAMPLE_RATE` | `1.0` (share of traces kept; errors and logs always sent) |
+| `logs` | `ZHARP_LOGS` | `false` — send what the app logs and prints; off, the Zharp agent brings the lines in (see [Logs](#logs)) |
+| `log_correlation` | `ZHARP_LOG_CORRELATION` | `true` — lines written during a request end with `trace_id=… span_id=…` (fields in JSON lines) |
+| — | `ZHARP_LOG_LEVEL` | `info` — with logs on, the lowest framework log level sent (`off` sends none) |
 | `tracing` | `ZHARP_TRACING` | `true` (`false` = logs only) |
 | `capture_bodies` | `ZHARP_CAPTURE_BODIES` | off (`errors`, `all` or options — see [Request and response bodies](#request-and-response-bodies)) |
-| `capture_output` | `ZHARP_CAPTURE_OUTPUT` | `true` — PHP warnings (plain PHP) and, in the CLI, what the process prints; see [Everything your app prints](#everything-your-app-prints) |
+| `capture_output` | `ZHARP_CAPTURE_OUTPUT` | `true` — with logs on, also what a CLI process prints (see [Logs](#logs)) |
 | `capture_uncaught` | — | `true` (the framework integrations use the framework's handler instead) |
 
 `ZHARP_DISABLED=true` turns it off. Zharp never throws into your app.

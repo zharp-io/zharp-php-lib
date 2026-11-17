@@ -30,7 +30,7 @@ final class OutputCaptureTest extends TestCase
     protected function tearDown(): void
     {
         Zharp::resetForTests();
-        unset($_SERVER['ZHARP_CAPTURE_OUTPUT']);
+        unset($_SERVER['ZHARP_CAPTURE_OUTPUT'], $_SERVER['ZHARP_LOG_CORRELATION'], $_SERVER['ZHARP_LOGS']);
     }
 
     /** @param array<string, mixed> $options */
@@ -39,6 +39,7 @@ final class OutputCaptureTest extends TestCase
         self::assertTrue(Zharp::init($options + [
             'key' => 'zpk_test',
             'service' => 'php-unit',
+            'logs' => true,
             'capture_uncaught' => false,
             'span_exporter' => new InMemorySpans(new ArrayObject()),
             'log_exporter' => new InMemoryLogs($this->logs),
@@ -112,7 +113,7 @@ final class OutputCaptureTest extends TestCase
 
         // Printed exactly as before.
         foreach ([
-            "plain stdout line\n", "[warn] disk almost full\n", "split across two writes\n", "inside the span\n",
+            "plain stdout line\n", "[warn] disk almost full\n", "split across two writes\n", "inside the span trace_id=",
             "\033[31mERROR\033[0m coloured\n", "app.WARNING: monolog once", "app.ERROR: monolog printed first",
             'Warning: careful now in ', "console says hi\n", "[Zharp] the SDK talking about itself\n",
         ] as $text) {
@@ -168,7 +169,15 @@ final class OutputCaptureTest extends TestCase
 
         // The SDK's own lines are not the app's.
         self::assertSame([], self::matching($result, '[Zharp]'));
-        self::assertCount(count($expected) + 3, $result['records']);
+
+        // A line is read before it is stamped: the stamp is not part of the message.
+        [$traceId] = $result['request_ids'];
+        foreach (['stamp-echo inside', 'stamp-console inside', 'stamp-monolog line {"order":7}', 'stamp-json record'] as $body) {
+            $found = array_values(array_filter($result['records'], static fn (array $r): bool => $r['body'] === $body));
+            self::assertCount(1, $found, $body);
+            self::assertSame($traceId, $found[0]['trace_id'], $body);
+        }
+        self::assertCount(1, self::matching($result, 'handler info'));
     }
 
     public function testOffPrintsTheSameAndSendsNoPrintedLines(): void
@@ -179,11 +188,59 @@ final class OutputCaptureTest extends TestCase
             self::assertStringContainsString("console stderr line\n", $run['stderr']);
             $printed = array_filter($run['result']['records'], static fn (array $r): bool => isset($r['attributes']['log.source']));
             self::assertSame([], array_values($printed));
-            // No warning capture either; Monolog's handler still sends.
-            self::assertSame([], self::matching($run['result'], 'careful now'));
+            // Logs are on: PHP warnings and Monolog's handler still send.
+            self::assertCount(1, self::matching($run['result'], 'careful now'));
             self::assertCount(1, self::matching($run['result'], 'monolog once'));
             self::assertSame(2, $run['result']['previous_calls']);
         }
+    }
+
+    public function testByDefaultNothingPrintedIsSentAndRequestLinesAreStamped(): void
+    {
+        $run = self::child('default');
+        self::assertSame(0, $run['code'], $run['stderr']);
+        $result = $run['result'];
+
+        // Only errors and Zharp::log() go out.
+        self::assertSame(
+            ['explicit zharp log', 'RuntimeException: caught one', 'logged with an exception'],
+            array_column($result['records'], 'body'),
+        );
+
+        [$traceId, $spanId] = $result['request_ids'];
+        $stamp = '/\s*\btrace_id=([0-9a-f]{32})\s+span_id=([0-9a-f]{16})\s*$/i';
+        $line = static function (string $output, string $text): string {
+            foreach (explode("\n", $output) as $line) {
+                if (str_contains($line, $text)) {
+                    return $line;
+                }
+            }
+            self::fail("no line with {$text}");
+        };
+        foreach ([[$run['stdout'], 'stamp-echo inside'], [$run['stdout'], 'stamp-monolog line'], [$run['stdout'], 'stamp-console inside'], [$run['stderr'], 'stamp-console-err inside']] as [$output, $text]) {
+            $found = $line($output, $text);
+            self::assertSame(1, preg_match($stamp, $found, $m), $found);
+            self::assertSame([$traceId, $spanId], [$m[1], $m[2]], $found);
+        }
+        $json = json_decode($line($run['stdout'], 'stamp-json record'), true);
+        self::assertSame([$traceId, $spanId], [$json['trace_id'], $json['span_id']]);
+        // Unchanged: outside a request, or carrying a trace_id already.
+        self::assertSame('stamp-outside echo', $line($run['stdout'], 'stamp-outside echo'));
+        self::assertStringEndsWith('stamp-outside monolog [] []', $line($run['stdout'], 'stamp-outside monolog'));
+        self::assertSame('stamp-already trace_id=abc', $line($run['stdout'], 'stamp-already'));
+        self::assertSame('plain stdout line', $line($run['stdout'], 'plain stdout'));
+    }
+
+    public function testEnvironmentSwitches(): void
+    {
+        $on = self::child('default', ['ZHARP_LOGS' => 'true']);
+        self::assertCount(1, self::matching($on['result'], 'plain stdout line'));
+        self::assertCount(1, self::matching($on['result'], 'handler info'));
+
+        $plain = self::child('default', ['ZHARP_LOG_CORRELATION' => 'false']);
+        self::assertSame(0, $plain['code'], $plain['stderr']);
+        self::assertDoesNotMatchRegularExpression('/trace_id=[0-9a-f]{32}/', $plain['stdout'] . $plain['stderr']);
+        self::assertStringContainsString("stamp-echo inside\n", $plain['stdout']);
     }
 
     // ── In process ───────────────────────────────────────────────────────────────────────────
@@ -200,17 +257,18 @@ final class OutputCaptureTest extends TestCase
         $this->start();
         $stream = self::memory();
         self::assertTrue(OutputCapture::tapStream($stream, 'stderr'));
-        $traceId = Zharp::startSpan('handle', static function () use ($stream): string {
+        [$traceId, $spanId] = Zharp::startSpan('handle', static function () use ($stream): array {
             fwrite($stream, "in the request\n");
 
-            return Span::getCurrent()->getContext()->getTraceId();
+            return [Span::getCurrent()->getContext()->getTraceId(), Span::getCurrent()->getContext()->getSpanId()];
         });
         fwrite($stream, 'level=info half a ');
         fwrite($stream, "line\n");
         Zharp::flush();
 
+        // Written as it was, the request's line stamped; sent without the stamp.
         rewind($stream);
-        self::assertSame("in the request\nlevel=info half a line\n", stream_get_contents($stream));
+        self::assertSame("in the request trace_id={$traceId} span_id={$spanId}\nlevel=info half a line\n", stream_get_contents($stream));
         $logs = $this->logs();
         self::assertSame(['in the request', 'level=info half a line'], $this->bodies());
         self::assertSame($traceId, $logs[0]->getSpanContext()->getTraceId());
@@ -243,10 +301,22 @@ final class OutputCaptureTest extends TestCase
         self::assertSame([], $this->logs());
     }
 
-    public function testOffTapsNothing(): void
+    public function testCaptureOffSendsNothingPrinted(): void
     {
         $_SERVER['ZHARP_CAPTURE_OUTPUT'] = 'false';
         $this->start();
+        $stream = self::memory();
+        // Still tapped, to stamp.
+        self::assertTrue(OutputCapture::tapStream($stream, 'stdout'));
+        fwrite($stream, "not sent\n");
+        Zharp::flush();
+        self::assertSame([], $this->logs());
+    }
+
+    public function testNothingIsTappedWithLogsAndCorrelationOff(): void
+    {
+        $_SERVER['ZHARP_LOG_CORRELATION'] = 'false';
+        $this->start(['logs' => false]);
         self::assertFalse(Zharp::capturesOutput());
         self::assertFalse(OutputCapture::tapStream(self::memory(), 'stdout'));
     }

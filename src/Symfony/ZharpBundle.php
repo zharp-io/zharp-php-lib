@@ -9,6 +9,7 @@ use Symfony\Component\DependencyInjection\Compiler\PassConfig;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Reference;
 use Symfony\Component\HttpKernel\Bundle\Bundle;
+use Zharp\Monolog\LogStamping;
 use Zharp\Monolog\ZharpHandler;
 use Zharp\Zharp;
 
@@ -19,9 +20,10 @@ use Zharp\Zharp;
  *     Zharp\Symfony\ZharpBundle::class => ['all' => true],
  *
  * Every main request gets a SERVER span (RequestSubscriber); an exception that escapes a
- * controller is an unhandled Zharp error; with MonologBundle, every channel's logs are sent
- * (ZHARP_LOG_LEVEL, info by default) with the trace, user and session; and what console commands
- * print is sent too (ZHARP_CAPTURE_OUTPUT).
+ * controller is an unhandled Zharp error; with MonologBundle, every line a channel writes during
+ * a request ends with its trace_id and span_id (ZHARP_LOG_CORRELATION). With ZHARP_LOGS=true,
+ * every channel's logs are sent too (ZHARP_LOG_LEVEL, info by default), and what console commands
+ * print (ZHARP_CAPTURE_OUTPUT).
  */
 final class ZharpBundle extends Bundle implements CompilerPassInterface
 {
@@ -40,19 +42,27 @@ final class ZharpBundle extends Bundle implements CompilerPassInterface
         $container->addCompilerPass($this, PassConfig::TYPE_BEFORE_OPTIMIZATION, -100);
     }
 
-    /** Adds Zharp's handler to every Monolog logger. */
+    /**
+     * Adds Zharp's handler to every Monolog logger, and stamps each logger's lines with the
+     * request's ids (LogStamping, run as the logger's configurator once its handlers are in).
+     */
     public function process(ContainerBuilder $container): void
     {
         $handler = new Reference('zharp.monolog_handler');
+        $hasPrototype = $container->hasDefinition('monolog.logger_prototype');
         // Every channel's logger is a child of the prototype and inherits its calls.
-        if ($container->hasDefinition('monolog.logger_prototype')) {
+        if ($hasPrototype) {
             $container->getDefinition('monolog.logger_prototype')->addMethodCall('pushHandler', [$handler]);
-
-            return;
         }
         foreach ($container->getDefinitions() as $id => $definition) {
-            if ($id === 'monolog.logger' || str_starts_with($id, 'monolog.logger.')) {
+            if ($id !== 'monolog.logger' && $id !== 'monolog.logger_prototype' && !str_starts_with($id, 'monolog.logger.')) {
+                continue;
+            }
+            if (!$hasPrototype) {
                 $definition->addMethodCall('pushHandler', [$handler]);
+            }
+            if ($definition->getConfigurator() === null) {
+                $definition->setConfigurator([LogStamping::class, 'configure']);
             }
         }
     }

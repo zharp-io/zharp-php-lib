@@ -98,12 +98,15 @@ final class Zharp
      *
      * Options (each falls back to the environment variable): key (ZHARP_KEY), service
      * (ZHARP_SERVICE, then OTEL_SERVICE_NAME), environment (ZHARP_ENVIRONMENT), release
-     * (ZHARP_RELEASE), endpoint (ZHARP_ENDPOINT), sample_rate (ZHARP_SAMPLE_RATE, 1.0),
+     * (ZHARP_RELEASE), sample_rate (ZHARP_SAMPLE_RATE, 1.0),
      * capture_uncaught (true: an uncaught exception or fatal error is reported), tracing
      * (ZHARP_TRACING, true; false = logs only: logs, errors and context still go out, but no
      * spans are made or sent and OpenTelemetry instrumentation gets no tracer or propagator),
-     * capture_output (ZHARP_CAPTURE_OUTPUT, true: PHP warnings, notices and deprecations, and in
-     * the CLI whatever the process prints, are sent as logs — see OutputCapture).
+     * logs (ZHARP_LOGS, false: send what the app logs and prints — Monolog, Laravel's Log, PHP
+     * warnings, and with capture_output (ZHARP_CAPTURE_OUTPUT, true) what a CLI process prints;
+     * off, only errors, traces and Zharp::log() calls are sent), log_correlation
+     * (ZHARP_LOG_CORRELATION, true: lines written during a request end with its trace_id and
+     * span_id, so Zharp links the agent's copy of them to the request).
      * For tests: span_exporter / log_exporter replace OTLP and export synchronously.
      * ZHARP_DISABLED=true turns it off. Returns whether it started.
      *
@@ -223,14 +226,29 @@ final class Zharp
                 exit(255);
             });
         }
-        if ($config->captureOutput) {
-            // Laravel and Symfony (capture_uncaught off) turn PHP warnings into logs and
-            // exceptions themselves; Zharp receives those.
-            if ($config->captureUncaught) {
-                PhpErrors::install();
-            }
-            OutputCapture::start();
+        // Laravel and Symfony (capture_uncaught off) turn PHP warnings into logs and exceptions
+        // themselves; Zharp receives those.
+        if ($config->logs && $config->captureUncaught) {
+            PhpErrors::install();
         }
+        // Where the Zharp agent reads the app's output it brings the lines in, linked by the
+        // stamp; the SDK sends them too only when logs are on.
+        OutputCapture::start($config->logs && $config->captureOutput, $config->logCorrelation);
+    }
+
+    /**
+     * Whether what the app logs and prints is sent (`logs` / ZHARP_LOGS, off by default). Errors,
+     * traces and Zharp::log() are sent either way.
+     */
+    public static function sendsLogs(): bool
+    {
+        return self::$config !== null && self::$config->logs;
+    }
+
+    /** Whether log lines written during a request get its trace_id and span_id (`log_correlation`). */
+    public static function stampsLogs(): bool
+    {
+        return self::$config !== null && self::$config->logCorrelation;
     }
 
     public static function isActive(): bool
@@ -250,10 +268,12 @@ final class Zharp
         return self::$config !== null && self::$config->tracing ? self::$config->bodies : null;
     }
 
-    /** @internal Whether capture_output is on (and Zharp running). */
+    /** @internal Whether a console command's output is tapped: to send it, or to stamp it. */
     public static function capturesOutput(): bool
     {
-        return self::$config !== null && self::$config->captureOutput;
+        $config = self::$config;
+
+        return $config !== null && (($config->logs && $config->captureOutput) || $config->logCorrelation);
     }
 
     public static function isTracing(): bool

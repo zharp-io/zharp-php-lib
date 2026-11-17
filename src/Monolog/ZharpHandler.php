@@ -12,7 +12,9 @@ use Zharp\Zharp;
 /**
  * Sends Monolog records (Monolog 2 and 3) to Zharp as OpenTelemetry logs, with the active trace
  * and the request's user and session. Context and extra become attributes; an exception under
- * the "exception" key is reported as an error unless it already was. Start Zharp first.
+ * the "exception" key is reported as an error unless it already was. Start Zharp first. With
+ * `logs` off (the default) only those exceptions are sent; the lines themselves reach Zharp
+ * through the agent, stamped with their request's ids (LogStamping).
  *
  *     $logger->pushHandler(new ZharpHandler('info'));
  *
@@ -70,6 +72,11 @@ class ZharpHandler extends AbstractProcessingHandler
         $extra = (array) $record['extra'];
         $exception = $context['exception'] ?? null;
         unset($context['exception']);
+        $exception = $exception instanceof Throwable ? $exception : null;
+        // Logs off (the default): only an exception not reported yet goes, as an error.
+        if (!Zharp::sendsLogs() && ($exception === null || Zharp::isReported($exception))) {
+            return;
+        }
 
         $attributes = $context;
         foreach ($extra as $key => $value) {
@@ -83,7 +90,7 @@ class ZharpHandler extends AbstractProcessingHandler
             strtolower((string) $record['level_name']),
             (string) $record['message'],
             $attributes,
-            $exception instanceof Throwable ? $exception : null,
+            $exception,
             true,
         );
     }

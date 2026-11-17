@@ -12,9 +12,8 @@ return [
 
     'environment' => env('ZHARP_ENVIRONMENT', env('APP_ENV')),
     'release' => env('ZHARP_RELEASE'),
-    'endpoint' => env('ZHARP_ENDPOINT'),
 
-    // Share of traces kept, 0.0–1.0. Logs and errors are always sent.
+    // Share of traces kept, 0.0–1.0. Errors (and logs, when on) are always sent.
     'sample_rate' => env('ZHARP_SAMPLE_RATE', 1.0),
 
     // false = logs only: logs, errors, user/session and tags are still sent, but no spans are
@@ -31,12 +30,24 @@ return [
     // Trace every HTTP request (a SERVER span each).
     'trace_requests' => env('ZHARP_TRACE_REQUESTS', true),
 
-    // Send what Laravel logs, from this level up; false to send none.
+    // Every line Laravel's log channels write during a request ends with
+    // " trace_id=<32 hex> span_id=<16 hex>" (a JSON line gets trace_id and span_id fields), so
+    // Zharp links the line the Zharp agent collects to its request. In containers, log to stderr
+    // (LOG_CHANNEL=stderr) and the agent brings the lines in. false to leave lines as they are.
+    'log_correlation' => env('ZHARP_LOG_CORRELATION', true),
+
+    // Send what the app logs from the SDK too. Off by default: where the Zharp agent reads the
+    // app's logs it already brings them in, and sending them here as well would send every line
+    // twice. Turn it on where there is no agent (serverless, managed hosts). Errors, traces and
+    // Zharp::log() calls are sent either way.
+    'logs' => env('ZHARP_LOGS', false),
+
+    // With logs on: send what Laravel logs from this level up; false to send none.
     'log_level' => env('ZHARP_LOG_LEVEL', 'info'),
 
-    // In queue workers, artisan commands and Octane/Swoole/RoadRunner workers, also send what the
-    // process prints (echo, print, var_dump, a command's output), each line with the trace it was
-    // printed in and its level read from the line. Never the HTTP response, and never a line
-    // Laravel's log already sent. false to turn it off.
+    // With logs on: in queue workers, artisan commands and Octane/Swoole/RoadRunner workers, also
+    // send what the process prints (echo, print, var_dump, a command's output), each line with the
+    // trace it was printed in and its level read from the line. Never the HTTP response, and never
+    // a line Laravel's log already sent. false to turn it off.
     'capture_output' => env('ZHARP_CAPTURE_OUTPUT', true),
 ];

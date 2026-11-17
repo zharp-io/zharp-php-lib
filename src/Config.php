@@ -27,6 +27,8 @@ final class Config
         public readonly bool $tracing,
         public readonly ?BodySettings $bodies,
         public readonly bool $captureOutput,
+        public readonly bool $logs = false,
+        public readonly bool $logCorrelation = true,
     ) {
     }
 
@@ -53,6 +55,8 @@ final class Config
             self::flag($options['tracing'] ?? self::env('ZHARP_TRACING'), true),
             Bodies::settings($options['capture_bodies'] ?? null, self::env('ZHARP_CAPTURE_BODIES')),
             self::flag($options['capture_output'] ?? self::env('ZHARP_CAPTURE_OUTPUT'), true),
+            self::flag($options['logs'] ?? self::env('ZHARP_LOGS'), false),
+            self::flag($options['log_correlation'] ?? self::env('ZHARP_LOG_CORRELATION'), true),
         );
     }
 

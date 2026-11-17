@@ -1,19 +1,24 @@
 <?php
 
-// A CLI process for OutputCaptureTest: prints in every way a worker might, then writes what Zharp
-// sent to the JSON file named by its first argument. The second argument: "all" (default), or
-// "off" for capture_output => false (ZHARP_CAPTURE_OUTPUT is read from the environment).
+// A CLI process for OutputCaptureTest: prints and logs in every way a worker might, then writes
+// what Zharp sent to the JSON file named by its first argument. The second argument:
+//   "all"     — logs => true (everything is sent);
+//   "off"     — logs => true, capture_output => false;
+//   "default" — no options: logs off, lines stamped.
+// ZHARP_* environment variables apply on top.
 
 declare(strict_types=1);
 
 require __DIR__ . '/../../vendor/autoload.php';
 
+use Monolog\Formatter\JsonFormatter;
 use Monolog\Handler\StreamHandler;
 use Monolog\Logger;
 use OpenTelemetry\API\Trace\Span;
 use OpenTelemetry\SDK\Logs\Exporter\InMemoryExporter as InMemoryLogs;
 use OpenTelemetry\SDK\Trace\SpanExporter\InMemoryExporter as InMemorySpans;
 use Zharp\Internal\OutputCapture;
+use Zharp\Monolog\LogStamping;
 use Zharp\Monolog\ZharpHandler;
 use Zharp\Zharp;
 
@@ -21,6 +26,7 @@ $file = $argv[1];
 $mode = $argv[2] ?? 'all';
 $logs = new ArrayObject();
 $traceId = null;
+$requestIds = null;
 $previousCalls = 0;
 
 // The app's own error handler, set first: it must still run.
@@ -35,11 +41,12 @@ Zharp::init(array_filter([
     'service' => 'output-child',
     'span_exporter' => new InMemorySpans(new ArrayObject()),
     'log_exporter' => new InMemoryLogs($logs),
+    'logs' => $mode === 'default' ? null : true,
     'capture_output' => $mode === 'off' ? false : null,
 ], static fn ($v) => $v !== null));
 
 // Registered after Zharp's own, so it runs once Zharp has sent everything.
-register_shutdown_function(static function () use ($file, $logs, &$traceId, &$previousCalls): void {
+register_shutdown_function(static function () use ($file, $logs, &$traceId, &$requestIds, &$previousCalls): void {
     $records = [];
     foreach ($logs as $record) {
         $records[] = [
@@ -53,6 +60,7 @@ register_shutdown_function(static function () use ($file, $logs, &$traceId, &$pr
     file_put_contents($file, json_encode([
         'records' => $records,
         'trace_id' => $traceId,
+        'request_ids' => $requestIds,
         'previous_calls' => $previousCalls,
     ]));
 });
@@ -121,6 +129,35 @@ OutputCapture::tapConsole($console);
 fwrite($stdout, "console says hi\n");
 fwrite($stderr, "console stderr line\n");
 fwrite($stderr, "ERROR console failure\n");
+
+// Stamping: lines written during a request end with its ids; a JSON record gets fields.
+$text = new Logger('web');
+$text->pushHandler(new StreamHandler('php://output'));
+LogStamping::apply($text);
+$jsonHandler = new StreamHandler('php://output');
+$jsonHandler->setFormatter(new JsonFormatter());
+$json = new Logger('web', [$jsonHandler]);
+LogStamping::apply($json);
+$withZharp = new Logger('app', [new ZharpHandler('debug')]);
+
+Zharp::startSpan('request', static function () use (&$requestIds, $text, $json, $withZharp, $stdout, $stderr): void {
+    $context = Span::getCurrent()->getContext();
+    $requestIds = [$context->getTraceId(), $context->getSpanId()];
+    echo "stamp-echo inside\n";
+    $text->info('stamp-monolog line', ['order' => 7]);
+    $json->warning('stamp-json record', ['order' => 7]);
+    fwrite($stdout, "stamp-console inside\n");
+    fwrite($stderr, "stamp-console-err inside\n");
+    echo "stamp-already trace_id=abc\n";
+    // Sent whether logs are on or not.
+    Zharp::info('explicit zharp log');
+    Zharp::captureError(new RuntimeException('caught one'));
+    $withZharp->error('logged with an exception', ['exception' => new RuntimeException('logged boom')]);
+    // Sent only with logs on.
+    $withZharp->info('handler info');
+});
+$text->info('stamp-outside monolog');
+echo "stamp-outside echo\n";
 
 echo "[Zharp] the SDK talking about itself\n";
 echo "no newline at the end";

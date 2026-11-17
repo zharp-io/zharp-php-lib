@@ -2,7 +2,17 @@
 
 ## Unreleased
 
-- `capture_output` (`ZHARP_CAPTURE_OUTPUT`), on by default: logs arrive however they are written.
+- Logs are off by default: `logs` (`ZHARP_LOGS=true`) sends what the app logs and prints. Where
+  the Zharp agent reads the app's output it already brings those lines in; sending them from the
+  SDK too made every line arrive twice. Errors, traces and `Zharp::log()` calls are sent either
+  way, as is an exception passed to a Monolog/Laravel log call.
+- `log_correlation` (`ZHARP_LOG_CORRELATION`), on by default: every line written during a request
+  ends with ` trace_id=<32 hex> span_id=<16 hex>` — or gets `trace_id`/`span_id` fields in a JSON
+  line — so Zharp links the agent's copy to its request. Laravel's log channels (stacks included)
+  and Symfony's Monolog loggers get it with no code (`Zharp\Monolog\LogStamping::apply()` for
+  your own); in the CLI, what is printed during a span too. Lines outside a request, and lines
+  that already carry a trace_id, are unchanged.
+- With logs on, `capture_output` (`ZHARP_CAPTURE_OUTPUT`, on): logs arrive however they are written.
   In plain PHP, PHP's warnings, notices and deprecations are sent (chaining the error handler set
   before; `error_reporting()` and `@` respected). In the CLI — queue workers, artisan and
   bin/console commands, scripts, Octane/Swoole/RoadRunner workers — what the process prints

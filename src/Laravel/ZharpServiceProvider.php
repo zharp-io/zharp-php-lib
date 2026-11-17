@@ -10,6 +10,7 @@ use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\ServiceProvider;
 use Throwable;
 use Zharp\Internal\OutputCapture;
+use Zharp\Monolog\LogStamping;
 use Zharp\Zharp;
 
 /**
@@ -18,9 +19,11 @@ use Zharp\Zharp;
  *
  * - every HTTP request gets a SERVER span (the TraceRequests global middleware);
  * - exceptions Laravel reports become unhandled Zharp errors, with the request's trace;
- * - everything Laravel logs (info and up by default) is sent with the trace, user and session;
- * - in queue workers, artisan and Octane workers, what the process prints (echo, a command's
- *   output) is sent too, once (capture_output / ZHARP_CAPTURE_OUTPUT);
+ * - every line Laravel's log channels write during a request ends with its trace_id and
+ *   span_id (log_correlation), so the Zharp agent's copy of the line is linked to the request;
+ * - with logs on (ZHARP_LOGS=true; off by default), everything Laravel logs (info and up) is sent
+ *   too, and in queue workers, artisan and Octane workers what the process prints (echo, a
+ *   command's output), once (capture_output);
  * - telemetry is sent once each response is out, and after every queue job.
  */
 class ZharpServiceProvider extends ServiceProvider
@@ -47,6 +50,8 @@ class ZharpServiceProvider extends ServiceProvider
             'tracing' => $config['tracing'] ?? null,
             'capture_bodies' => $config['capture_bodies'] ?? null,
             'capture_output' => $config['capture_output'] ?? null,
+            'logs' => $config['logs'] ?? null,
+            'log_correlation' => $config['log_correlation'] ?? null,
             // Laravel's exception handler reports uncaught exceptions; Zharp listens there.
             'capture_uncaught' => false,
             'quiet' => true,
@@ -62,8 +67,47 @@ class ZharpServiceProvider extends ServiceProvider
         }
         $this->reportExceptions();
         $this->bridgeLogs($config['log_level'] ?? 'info');
+        $this->stampLogChannels();
         $this->captureCommandOutput();
         $this->flushAfterWork();
+    }
+
+    /**
+     * The request's ids on every line Laravel's channels write: a tap on each configured channel
+     * (stacks included), and the channels already made.
+     */
+    private function stampLogChannels(): void
+    {
+        if (!Zharp::stampsLogs()) {
+            return;
+        }
+        try {
+            $config = $this->app['config'];
+            $channels = $config->get('logging.channels');
+            if (is_array($channels)) {
+                foreach ($channels as $name => $channel) {
+                    if (is_array($channel)) {
+                        $taps = (array) ($channel['tap'] ?? []);
+                        if (!in_array(StampLogs::class, $taps, true)) {
+                            $taps[] = StampLogs::class;
+                        }
+                        $channels[$name]['tap'] = $taps;
+                    }
+                }
+                $config->set('logging.channels', $channels);
+            }
+            if ($this->app->resolved('log')) {
+                $manager = $this->app->make('log');
+                if (is_object($manager) && method_exists($manager, 'getChannels')) {
+                    foreach ((array) $manager->getChannels() as $logger) {
+                        if (is_object($logger)) {
+                            LogStamping::apply($logger);
+                        }
+                    }
+                }
+            }
+        } catch (Throwable) {
+        }
     }
 
     /** What an artisan command prints ($this->info(), the queue worker's job lines …). */
@@ -131,6 +175,10 @@ class ZharpServiceProvider extends ServiceProvider
             $context = $event->context;
             $exception = $context['exception'] ?? null;
             unset($context['exception']);
+            // Logs off (the default): only an exception not reported yet goes, as an error.
+            if (!Zharp::sendsLogs() && (!$exception instanceof Throwable || Zharp::isReported($exception))) {
+                return;
+            }
             Zharp::emit(
                 $severity,
                 $level,

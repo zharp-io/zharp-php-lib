@@ -8,8 +8,8 @@ use php_user_filter;
 use Throwable;
 
 /**
- * A write filter that copies what passes through a console stream to OutputCapture. The bytes
- * themselves go on unchanged.
+ * A write filter that copies what passes through a console stream to OutputCapture, which may
+ * stamp complete lines with the active span's ids; otherwise the bytes go on unchanged.
  *
  * @internal
  */
@@ -26,7 +26,11 @@ final class OutputFilter extends php_user_filter
             $consumed += $bucket->datalen;
             try {
                 if (is_array($this->params)) {
-                    OutputCapture::fromStream((string) $this->params['key'], (string) $this->params['source'], (string) $bucket->data);
+                    $data = (string) $bucket->data;
+                    $written = OutputCapture::fromStream((string) $this->params['key'], (string) $this->params['source'], $data);
+                    if ($written !== $data) {
+                        $bucket->data = $written;
+                    }
                 }
             } catch (Throwable) {
                 // A line that could not be copied is not worth breaking the write.

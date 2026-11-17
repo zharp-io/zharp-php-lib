@@ -45,6 +45,7 @@ final class ZharpTest extends TestCase
             'service' => 'php-unit',
             'environment' => 'test',
             'release' => 'api@1.0.0',
+            'logs' => true,
             'capture_uncaught' => false,
             'span_exporter' => new InMemorySpans($this->spans),
             'log_exporter' => new InMemoryLogs($this->logs),

@@ -10,9 +10,15 @@ use Throwable;
 use Zharp\Zharp;
 
 /**
- * What a CLI process prints, as logs: the net under the exact captures (Zharp::log, Monolog,
- * Laravel's log events, PHP warnings), for whatever reaches the output some other way. Each line
- * keeps the trace and span it was printed in, and still prints exactly as before.
+ * What a CLI process prints. Two jobs, each on its own switch:
+ *
+ * - stamp (log_correlation, on by default): a line printed while a span is active ends with
+ *   ` trace_id=… span_id=…` (fields in a JSON line), so the Zharp agent's copy of the output is
+ *   linked to its request. Lines outside a span, and lines with a trace_id already, are unchanged.
+ * - capture (logs + capture_output, off by default): the line is also sent as a log — the net under
+ *   the exact captures (Zharp::log, Monolog, Laravel's log events, PHP warnings), for whatever
+ *   reaches the output some other way, with the trace and span it was printed in. A line is read
+ *   before it is stamped.
  *
  * Where it listens, and why only there:
  *
@@ -46,6 +52,8 @@ final class OutputCapture
     private const DRAIN_COUNT = 50;
 
     private static bool $active = false;
+    private static bool $capture = false;
+    private static bool $stamp = false;
     private static bool $buffering = false;
     private static bool $inHandler = false;
     private static bool $draining = false;
@@ -59,10 +67,15 @@ final class OutputCapture
     /** @var array<string, string> line buffer key → source */
     private static array $sources = [];
 
-    /** Start capturing; $outputLayer also buffers PHP's output where that is safe. */
-    public static function start(bool $outputLayer = true): void
+    /** Start capturing and/or stamping; $outputLayer also buffers PHP's output where that is safe. */
+    public static function start(bool $capture, bool $stamp, bool $outputLayer = true): void
     {
-        self::$active = true;
+        self::$capture = $capture;
+        self::$stamp = $stamp;
+        self::$active = $capture || $stamp;
+        if (!self::$active) {
+            return;
+        }
         if ($outputLayer && !self::$buffering && self::outputLayerSafe()) {
             try {
                 self::$buffering = ob_start(self::HANDLER, 1);
@@ -84,7 +97,8 @@ final class OutputCapture
     }
 
     /**
-     * The output buffer. Only copies: it returns what it was given and sends nothing.
+     * The output buffer. Copies (sending nothing from here) and stamps; otherwise returns what it
+     * was given.
      *
      * @param mixed $buffer
      * @param mixed $phase
@@ -92,17 +106,21 @@ final class OutputCapture
     public static function handle($buffer, $phase = 0): string
     {
         $buffer = (string) $buffer;
-        if ($buffer !== '' && self::$active && !self::$inHandler && !((int) $phase & PHP_OUTPUT_HANDLER_CLEAN) && !SentLines::isQuiet()) {
-            self::$inHandler = true;
-            try {
-                self::take('output', 'stdout', $buffer);
-            } catch (Throwable) {
-            } finally {
-                self::$inHandler = false;
-            }
+        if ($buffer === '' || !self::$active || self::$inHandler || ((int) $phase & PHP_OUTPUT_HANDLER_CLEAN)) {
+            return $buffer;
         }
+        self::$inHandler = true;
+        try {
+            if (self::$capture && !SentLines::isQuiet()) {
+                self::take('output', 'stdout', $buffer);
+            }
 
-        return $buffer;
+            return self::stamped($buffer);
+        } catch (Throwable) {
+            return $buffer;
+        } finally {
+            self::$inHandler = false;
+        }
     }
 
     /**
@@ -166,18 +184,33 @@ final class OutputCapture
         return true;
     }
 
-    /** What a filtered stream wrote. */
-    public static function fromStream(string $key, string $source, string $data): void
+    /** What a filtered stream wrote; returns what to write (stamped). */
+    public static function fromStream(string $key, string $source, string $data): string
     {
-        if (!self::$active || $data === '' || SentLines::isQuiet()) {
-            return;
+        if (!self::$active || $data === '') {
+            return $data;
         }
-        self::take($key, $source, $data);
-        if (count(self::$queue) >= self::DRAIN_COUNT) {
-            self::drain();
-        } else {
-            self::drain(self::DRAIN_AFTER_SECONDS);
+        if (self::$capture && !SentLines::isQuiet()) {
+            self::take($key, $source, $data);
+            if (count(self::$queue) >= self::DRAIN_COUNT) {
+                self::drain();
+            } else {
+                self::drain(self::DRAIN_AFTER_SECONDS);
+            }
         }
+
+        return self::stamped($data);
+    }
+
+    /** Complete lines in a write, with the active span's ids when there is one. */
+    private static function stamped(string $text): string
+    {
+        if (!self::$stamp || !str_contains($text, "\n")) {
+            return $text;
+        }
+        $ids = LogLine::activeIds();
+
+        return $ids === null ? $text : LogLine::stampText($text, $ids[0], $ids[1]);
     }
 
     /**
@@ -242,6 +275,8 @@ final class OutputCapture
         } catch (Throwable) {
         }
         self::$active = false;
+        self::$capture = false;
+        self::$stamp = false;
         if (self::$buffering) {
             $handlers = ob_list_handlers();
             if ($handlers !== [] && end($handlers) === self::HANDLER) {
