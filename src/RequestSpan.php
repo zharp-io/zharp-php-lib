@@ -12,6 +12,7 @@ use OpenTelemetry\Context\ScopeInterface;
 use Throwable;
 use Zharp\Internal\Bodies;
 use Zharp\Internal\BodySettings;
+use Zharp\Internal\Headers;
 
 /**
  * The SERVER span of one incoming request, for framework integrations: continues the caller's
@@ -76,6 +77,9 @@ final class RequestSpan
                 'client.address' => $clientAddress,
             ], static fn ($v) => $v !== null && $v !== ''))
             ->startSpan();
+        if (Zharp::headersEnabled()) {
+            $span->setAttributes(Headers::attributes('request', $headers, Zharp::bodySettings()));
+        }
         // The extracted context holds the baggage: logs during the request read it from here.
         $scope = $span->storeInContext($parent)->activate();
         $url = $scheme . '://' . $host . ($port !== null ? ':' . $port : '') . $path . ($query !== null && $query !== '' ? '?' . $query : '');
@@ -113,13 +117,17 @@ final class RequestSpan
      * and above) and its URL is allowed.
      *
      * @param (callable(BodySettings): array<string, mixed>)|null $bodies
+     * @param array<string, string|list<string|null>|null> $responseHeaders
      */
-    public function end(int $statusCode, ?callable $bodies = null): void
+    public function end(int $statusCode, ?callable $bodies = null, array $responseHeaders = []): void
     {
         if ($this->ended) {
             return;
         }
         $this->ended = true;
+        if ($responseHeaders !== [] && Zharp::headersEnabled()) {
+            $this->span->setAttributes(Headers::attributes('response', $responseHeaders, Zharp::bodySettings()));
+        }
         if ($statusCode > 0) {
             $this->span->setAttribute('http.response.status_code', $statusCode);
         }

@@ -93,15 +93,18 @@ final class RequestSubscriber implements EventSubscriberInterface
         }
         $request = $event->getRequest();
         $response = $event->getResponse();
-        $this->finish(static fn (BodySettings $settings): array => HttpFoundationBodies::attributes($request, $response, $settings));
+        $this->finish(static fn (BodySettings $settings): array => HttpFoundationBodies::attributes($request, $response, $settings), $response->headers->all());
         Zharp::flush();
     }
 
-    /** @param (callable(BodySettings): array<string, mixed>)|null $bodies */
-    private function finish(?callable $bodies = null): void
+    /**
+     * @param (callable(BodySettings): array<string, mixed>)|null $bodies
+     * @param array<string, list<string|null>> $responseHeaders
+     */
+    private function finish(?callable $bodies = null, array $responseHeaders = []): void
     {
         if ($this->span !== null) {
-            $this->span->end($this->status, $bodies);
+            $this->span->end($this->status, $bodies, $responseHeaders);
             $this->span = null;
         }
         Zharp::clearUser();

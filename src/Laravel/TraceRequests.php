@@ -73,7 +73,7 @@ final class TraceRequests
             }
         } catch (Throwable) {
         }
-        $span->end($status, static fn (BodySettings $settings): array => HttpFoundationBodies::attributes($request, $response, $settings));
+        $span->end($status, static fn (BodySettings $settings): array => HttpFoundationBodies::attributes($request, $response, $settings), $response?->headers->all() ?? []);
         Zharp::clearUser();
     }
 }

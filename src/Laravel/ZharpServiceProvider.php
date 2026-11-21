@@ -52,6 +52,8 @@ class ZharpServiceProvider extends ServiceProvider
             'capture_output' => $config['capture_output'] ?? null,
             'logs' => $config['logs'] ?? null,
             'log_correlation' => $config['log_correlation'] ?? null,
+            'capture_headers' => $config['capture_headers'] ?? null,
+            'capture_source_context' => $config['capture_source_context'] ?? null,
             // Laravel's exception handler reports uncaught exceptions; Zharp listens there.
             'capture_uncaught' => false,
             'quiet' => true,
