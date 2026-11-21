@@ -29,6 +29,8 @@ final class Config
         public readonly bool $captureOutput,
         public readonly bool $logs = false,
         public readonly bool $logCorrelation = true,
+        public readonly bool $captureHeaders = true,
+        public readonly bool $captureSourceContext = true,
     ) {
     }
 
@@ -57,6 +59,8 @@ final class Config
             self::flag($options['capture_output'] ?? self::env('ZHARP_CAPTURE_OUTPUT'), true),
             self::flag($options['logs'] ?? self::env('ZHARP_LOGS'), false),
             self::flag($options['log_correlation'] ?? self::env('ZHARP_LOG_CORRELATION'), true),
+            self::flag($options['capture_headers'] ?? self::env('ZHARP_CAPTURE_HEADERS'), true),
+            self::flag($options['capture_source_context'] ?? self::env('ZHARP_CAPTURE_SOURCE_CONTEXT'), true),
         );
     }
 

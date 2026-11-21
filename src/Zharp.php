@@ -183,6 +183,7 @@ final class Zharp
         $propagator = new MultiTextMapPropagator([TraceContextPropagator::getInstance(), BaggagePropagator::getInstance()]);
 
         self::$config = $config;
+        \Zharp\Internal\SourceContext::$enabled = $config->captureSourceContext;
         self::$tracerProvider = $tracerProvider;
         self::$loggerProvider = $loggerProvider;
         self::$propagator = $propagator;
@@ -397,7 +398,7 @@ final class Zharp
      */
     public static function captureError(Throwable $error, array $attributes = []): void
     {
-        self::emit(17, 'error', get_class($error) . ': ' . $error->getMessage(), $attributes, $error, true);
+        self::emit(17, 'error', Exceptions::title($error), $attributes, $error, true);
     }
 
     /**
@@ -412,7 +413,14 @@ final class Zharp
         if (!$handled && $span->isRecording()) {
             $span->setStatus(StatusCode::STATUS_ERROR, $error->getMessage());
         }
-        self::emit(17, 'error', get_class($error) . ': ' . $error->getMessage(), [], $error, $handled);
+        self::emit(17, 'error', Exceptions::title($error), [], $error, $handled);
+    }
+
+    /** @internal */
+    /** @internal Whether request and response headers go on the request's span. */
+    public static function headersEnabled(): bool
+    {
+        return self::$config !== null && self::$config->tracing && self::$config->captureHeaders;
     }
 
     /** @internal */
