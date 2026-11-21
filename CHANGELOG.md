@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.5.0 (`zharp/zharp`) — 2026-11-21
+
+- Request and response headers on the request's span (`capture_headers`, `ZHARP_CAPTURE_HEADERS`); secrets are sent as `[Filtered]`.
+- Failed queries are named from the database's code (SQLSTATE) and leave out the row's values.
+- The code that ran goes with each error (`capture_source_context`); stack lines name the function they are in, without arguments.
+- Laravel: both options in `config/zharp.php`. Works with Laravel 13 and Guzzle 8.
+
 ## v0.4.0 (`zharp/zharp`) — 2026-11-17
 
 **Behaviour change:** logs are no longer sent unless `logs` / `ZHARP_LOGS` is on. Errors, traces
