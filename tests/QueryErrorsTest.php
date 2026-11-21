@@ -85,9 +85,39 @@ final class QueryErrorsTest extends TestCase
         $e = (static fn (string $email) => new RuntimeException('x'))('ada@example.com');
         $stack = Exceptions::stacktrace(self::thrownWith('ada@example.com'));
         self::assertStringNotContainsString('ada@example.com', $stack);
-        self::assertMatchesRegularExpression('/#1 .*thrownWith\(\)/', $stack);
+        // Each line names the function it is in: the throw site in thrownWith(), its call here.
+        self::assertMatchesRegularExpression('/^#0 .*QueryErrorsTest\.php\(\d+\): .*thrownWith\(\)$/m', $stack);
+        self::assertMatchesRegularExpression('/^#1 .*QueryErrorsTest\.php\(86\): .*testStacksNeverCarryArguments\(\)$/m', $stack);
         self::assertStringEndsWith('{main}', $stack);
         unset($e);
+    }
+
+    public function testAnErrorTurnedIntoAnExceptionIsNamedAfterWhereItHappened(): void
+    {
+        // Laravel's way: the handler set through a closure, so two handler frames come first.
+        $handle = static function (int $level, string $message, string $file, int $line): bool {
+            throw new \ErrorException($message, 0, $level, $file, $line);
+        };
+        set_error_handler(static fn (...$args) => $handle(...$args));
+        try {
+            self::readsNull();
+            self::fail('no error');
+        } catch (\ErrorException $error) {
+            $stack = Exceptions::stacktrace($error);
+        } finally {
+            restore_error_handler();
+        }
+        $lines = explode("\n", $stack);
+        // The handler's frame is the error's own line, inside readsNull() — not a separate frame.
+        self::assertMatchesRegularExpression('/^#0 .*QueryErrorsTest\.php\(\d+\): .*readsNull\(\)$/', $lines[1]);
+        self::assertMatchesRegularExpression('/^#1 .*: .*testAnErrorTurnedIntoAnExceptionIsNamedAfterWhereItHappened\(\)$/', $lines[2]);
+    }
+
+    private static function readsNull(): int
+    {
+        $rate = null;
+
+        return $rate->value;
     }
 
     private static function thrownWith(string $email): RuntimeException

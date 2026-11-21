@@ -55,32 +55,57 @@ final class Exceptions
         $parts = [];
         $depth = 0;
         for ($current = $e; $current !== null && $depth < 5; $current = $current->getPrevious(), $depth++) {
-            $frames = self::frames($current);
             $parts[] = ($depth > 0 ? 'Caused by: ' : '')
                 . get_class($current) . ': ' . self::message($current) . "\n"
-                . '#0 ' . $current->getFile() . '(' . $current->getLine() . ')' . "\n"
-                . $frames;
+                . self::frames($current);
         }
 
         return implode("\n", $parts);
     }
 
     /**
-     * The frames as getTraceAsString writes them, numbered from #1 — without the arguments. PHP
-     * prints them unless zend.exception_ignore_args is on, and they are the app's data: an email
-     * passed to create(), a password to login().
+     * The stack innermost first, each line naming the function it is IN — "#0 app.php(12):
+     * price_with_tax()" — the way every other language's stack reads, and what the error page
+     * shows next to that line's code. getTraceAsString names the function CALLED on each line
+     * instead, one frame off: the throw site would show no function and price_with_tax() would sit
+     * on its caller's line.
+     *
+     * Without the arguments: PHP prints them unless zend.exception_ignore_args is on, and they are
+     * the app's data — an email passed to create(), a password to login().
      */
     private static function frames(Throwable $e): string
     {
-        $lines = [];
-        $n = 1;
-        foreach ($e->getTrace() as $frame) {
-            $where = isset($frame['file']) ? $frame['file'] . '(' . ($frame['line'] ?? 0) . ')' : '[internal function]';
-            $call = ($frame['class'] ?? '') . ($frame['type'] ?? '') . ($frame['function'] ?? '');
-            $lines[] = '#' . $n++ . ' ' . $where . ': ' . $call . '()';
-        }
-        $lines[] = '#' . $n . ' {main}';
+        $trace = $e->getTrace();
+        $call = static fn (?array $frame): string => $frame === null
+            ? '{main}'
+            : ($frame['class'] ?? '') . ($frame['type'] ?? '') . ($frame['function'] ?? '') . '()';
+        $where = static fn (array $frame): string => isset($frame['file'])
+            ? $frame['file'] . '(' . ($frame['line'] ?? 0) . ')'
+            : '[internal function]';
 
-        return implode("\n", $lines);
+        $lines = [];
+        // An error turned into an exception (ErrorException, thrown by an error handler): PHP
+        // called the handler from the error's own line, so the trace starts with the handler's
+        // frames — Laravel's goes through a closure first. The frame at the error's line is where
+        // it happened; the handler's frames above it are dropped.
+        if ($e instanceof \ErrorException) {
+            foreach (array_slice($trace, 0, 5, true) as $i => $frame) {
+                if (($frame['file'] ?? null) === $e->getFile() && ($frame['line'] ?? null) === $e->getLine()) {
+                    $trace = array_slice($trace, $i);
+                    break;
+                }
+            }
+        }
+        $first = $trace[0] ?? null;
+        $handlerAtSite = $first !== null && ($first['file'] ?? null) === $e->getFile() && ($first['line'] ?? null) === $e->getLine();
+        // Else the throw site, inside the first call of the trace.
+        if (!$handlerAtSite) {
+            $lines[] = $e->getFile() . '(' . $e->getLine() . '): ' . $call($first);
+        }
+        foreach ($trace as $i => $frame) {
+            $lines[] = $where($frame) . ': ' . $call($trace[$i + 1] ?? null);
+        }
+
+        return implode("\n", array_map(static fn (string $line, int $n): string => '#' . $n . ' ' . $line, $lines, array_keys($lines)));
     }
 }
