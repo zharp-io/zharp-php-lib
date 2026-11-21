@@ -27,6 +27,14 @@ return [
     // are described (name, type, size), never sent. Text is capped at 32 KB (128 KB at most).
     'capture_bodies' => env('ZHARP_CAPTURE_BODIES', false),
 
+    // Request and response headers on the request's span. Secrets (Authorization, Cookie,
+    // API keys, …) are sent as [Filtered]. false to send none.
+    'capture_headers' => env('ZHARP_CAPTURE_HEADERS', true),
+
+    // The lines of code around each frame of an error, read from the files on the server, so the
+    // error page shows the code that ran. false to leave them out.
+    'capture_source_context' => env('ZHARP_CAPTURE_SOURCE_CONTEXT', true),
+
     // Trace every HTTP request (a SERVER span each).
     'trace_requests' => env('ZHARP_TRACE_REQUESTS', true),
 
