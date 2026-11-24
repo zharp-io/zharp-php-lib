@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.6.0 (`zharp/zharp`) — 2026-11-24
 
 - Plain PHP: `Zharp::init()` in a web request traces the request PHP is serving, from `$_SERVER`
   (`trace_request`, `ZHARP_TRACE_REQUEST`): named by its script, or by route with
