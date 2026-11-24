@@ -47,11 +47,29 @@ channel's lines written during a request carry its ids (see [Logs](#logs)).
 
 ## Plain PHP
 
+Right after Composer's autoloader, in every entry point (`index.php`, or the bootstrap file each
+page includes):
+
 ```php
+require __DIR__ . '/vendor/autoload.php';
+
 Zharp\Zharp::init(['key' => 'zpk_…', 'service' => 'checkout-api', 'environment' => 'production']);
 ```
 
-An uncaught exception or fatal error is reported; `Zharp\RequestSpan::start(...)` makes a request
+Under PHP-FPM, Apache, FrankenPHP or `php -S`, the request PHP is serving gets a SERVER span from
+`$_SERVER`: named by its script (`POST /checkout.php`), continuing the caller's `traceparent` and
+`baggage`, and ended with the response's status when the script ends — after the app's own shutdown
+functions, and under PHP-FPM after `fastcgi_finish_request()`, so the response isn't held up. With a
+router (one `index.php` for every URL), name it by route once it has matched:
+
+```php
+Zharp\Zharp::setRoute('/orders/{id}');
+```
+
+An uncaught exception or fatal error is reported once, with the code that ran, and fails the
+request, which still answers 500 (logged, and shown with `display_errors`, as PHP does). In the CLI
+there is no request: a script reports what ends it. `'trace_request' => false` /
+`ZHARP_TRACE_REQUEST=false` leaves requests untraced; `Zharp\RequestSpan::start(...)` makes a request
 span for frameworks without an integration. Monolog: `Zharp\Monolog\LogStamping::apply($logger)`
 puts the request's ids on its lines; with logs on, `$logger->pushHandler(new Zharp\Monolog\ZharpHandler('info'))`
 sends them too.
@@ -184,6 +202,7 @@ traced by Zharp's middleware / subscriber.
 | `capture_bodies` | `ZHARP_CAPTURE_BODIES` | off (`errors`, `all` or options — see [Request and response bodies](#request-and-response-bodies)) |
 | `capture_output` | `ZHARP_CAPTURE_OUTPUT` | `true` — with logs on, also what a CLI process prints (see [Logs](#logs)) |
 | `capture_uncaught` | — | `true` (the framework integrations use the framework's handler instead) |
+| `trace_request` | `ZHARP_TRACE_REQUEST` | `true` in plain PHP serving a web request: its span from `$_SERVER` |
 
 `ZHARP_DISABLED=true` turns it off. Zharp never throws into your app.
 

@@ -31,6 +31,7 @@ final class Config
         public readonly bool $logCorrelation = true,
         public readonly bool $captureHeaders = true,
         public readonly bool $captureSourceContext = true,
+        public readonly bool $traceRequest = false,
     ) {
     }
 
@@ -61,7 +62,17 @@ final class Config
             self::flag($options['log_correlation'] ?? self::env('ZHARP_LOG_CORRELATION'), true),
             self::flag($options['capture_headers'] ?? self::env('ZHARP_CAPTURE_HEADERS'), true),
             self::flag($options['capture_source_context'] ?? self::env('ZHARP_CAPTURE_SOURCE_CONTEXT'), true),
+            // Plain PHP serving a web request: its span from $_SERVER. The framework integrations
+            // (capture_uncaught off) make their own.
+            (bool) ($options['capture_uncaught'] ?? true)
+                && self::flag($options['trace_request'] ?? self::env('ZHARP_TRACE_REQUEST'), self::webSapi()),
         );
+    }
+
+    /** Whether PHP is serving a web request (FPM, Apache, CGI, `php -S`, FrankenPHP), not the CLI. */
+    public static function webSapi(): bool
+    {
+        return !in_array(PHP_SAPI, ['cli', 'phpdbg', 'embed'], true);
     }
 
     /** true/false, 1/0, yes/no, on/off; anything else (or unset) is the default. */

@@ -87,6 +87,91 @@ final class RequestSpan
         return new self($span, $scope, $method, $url);
     }
 
+    /**
+     * The request PHP is serving, read from $_SERVER (or $server): for plain PHP under PHP-FPM,
+     * Apache, FrankenPHP or `php -S`. Named "METHOD /script.php" until setRoute() names it by
+     * route, so a site of .php pages gets a name per page with no code. Null in the CLI (there is
+     * no request) and before init.
+     *
+     * @param array<string, mixed>|null $server
+     */
+    public static function fromGlobals(?array $server = null): ?self
+    {
+        $server ??= $_SERVER;
+        $method = $server['REQUEST_METHOD'] ?? null;
+        if (!is_string($method) || $method === '') {
+            return null;
+        }
+        $https = $server['HTTPS'] ?? '';
+        $scheme = (is_string($https) && $https !== '' && strtolower($https) !== 'off') ? 'https' : 'http';
+        $forwarded = $server['HTTP_X_FORWARDED_PROTO'] ?? null;
+        if (is_string($forwarded)) {
+            $proto = strtolower(trim(explode(',', $forwarded)[0]));
+            if ($proto === 'http' || $proto === 'https') {
+                $scheme = $proto;
+            }
+        }
+        $hostHeader = (string) ($server['HTTP_HOST'] ?? $server['SERVER_NAME'] ?? '');
+        $host = $hostHeader;
+        $port = null;
+        if (preg_match('/^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/', $hostHeader, $m) === 1) {
+            $host = $m[1];
+            $port = isset($m[2]) && $m[2] !== '' ? (int) $m[2] : null;
+        }
+        if (($scheme === 'http' && $port === 80) || ($scheme === 'https' && $port === 443)) {
+            $port = null;
+        }
+        $uri = (string) ($server['REQUEST_URI'] ?? '/');
+        $path = parse_url($uri, PHP_URL_PATH);
+        $path = is_string($path) && $path !== '' ? $path : '/';
+        $query = $server['QUERY_STRING'] ?? parse_url($uri, PHP_URL_QUERY);
+        $query = is_string($query) ? $query : null;
+
+        $headers = [];
+        foreach ($server as $name => $value) {
+            if (!is_string($name) || !is_string($value)) {
+                continue;
+            }
+            if (str_starts_with($name, 'HTTP_')) {
+                $headers[strtolower(str_replace('_', '-', substr($name, 5)))] = $value;
+            } elseif (($name === 'CONTENT_TYPE' || $name === 'CONTENT_LENGTH') && $value !== '') {
+                $headers[strtolower(str_replace('_', '-', $name))] = $value;
+            }
+        }
+        $client = $server['REMOTE_ADDR'] ?? null;
+
+        $request = self::start($method, $scheme, $host, $port, $path, $query, $headers, is_string($client) && $client !== '' ? $client : null);
+        $script = $server['SCRIPT_NAME'] ?? null;
+        if ($request !== null && $request->url !== '' && is_string($script) && str_ends_with($script, '.php')) {
+            $request->span->updateName($method . ' ' . $script);
+        }
+
+        return $request;
+    }
+
+    /** Whether end() has run. */
+    public function hasEnded(): bool
+    {
+        return $this->ended;
+    }
+
+    /** A fatal error ended the request (one with no exception: out of memory, time limit). */
+    public function fail(string $message = ''): void
+    {
+        if (!$this->ended) {
+            $this->failed = true;
+            if ($this->span->isRecording()) {
+                $this->span->setStatus(StatusCode::STATUS_ERROR, $message);
+            }
+        }
+    }
+
+    /** Whether something that escaped the app was recorded on it. */
+    public function hasFailed(): bool
+    {
+        return $this->failed;
+    }
+
     public function span(): SpanInterface
     {
         return $this->span;

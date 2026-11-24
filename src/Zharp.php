@@ -88,6 +88,8 @@ final class Zharp
     /** @var callable|null */
     private static $previousExceptionHandler = null;
     private static bool $exceptionHandlerSet = false;
+    /** Plain PHP: the web request being served, traced from $_SERVER by init(). */
+    private static ?RequestSpan $request = null;
 
     private function __construct()
     {
@@ -106,7 +108,9 @@ final class Zharp
      * warnings, and with capture_output (ZHARP_CAPTURE_OUTPUT, true) what a CLI process prints;
      * off, only errors, traces and Zharp::log() calls are sent), log_correlation
      * (ZHARP_LOG_CORRELATION, true: lines written during a request end with its trace_id and
-     * span_id, so Zharp links the agent's copy of them to the request).
+     * span_id, so Zharp links the agent's copy of them to the request), trace_request
+     * (ZHARP_TRACE_REQUEST; on when plain PHP serves a web request: the request PHP is serving
+     * gets its SERVER span from $_SERVER, ended with its status when the script ends).
      * For tests: span_exporter / log_exporter replace OTLP and export synchronously.
      * ZHARP_DISABLED=true turns it off. Returns whether it started.
      *
@@ -209,23 +213,39 @@ final class Zharp
             self::$shutdownRegistered = true;
             register_shutdown_function(static function (): void {
                 self::reportFatalError();
-                self::shutdown();
+                if (self::$request === null) {
+                    self::shutdown();
+
+                    return;
+                }
+                // A web request ends last, after the app's own shutdown functions (registered
+                // after init): what they log belongs to it, and the response is out first.
+                register_shutdown_function(static function (): void {
+                    self::finishRequest();
+                    self::shutdown();
+                });
             });
         }
         if ($config->captureUncaught && !self::$exceptionHandlerSet) {
             self::$exceptionHandlerSet = true;
             self::$previousExceptionHandler = set_exception_handler(static function (Throwable $e): void {
-                self::reportException($e, false);
+                $request = self::$request;
+                if ($request !== null && !$request->hasEnded()) {
+                    $request->recordException($e);
+                } else {
+                    self::reportException($e, false);
+                }
                 $previous = self::$previousExceptionHandler;
                 if (is_callable($previous)) {
                     $previous($e);
 
                     return;
                 }
-                // What PHP does with no handler: print it and exit with status 255.
-                error_log('PHP Fatal error:  Uncaught ' . $e);
-                exit(255);
+                self::uncaughtAsPhpWould($e);
             });
+        }
+        if ($config->traceRequest && self::$request === null) {
+            self::$request = RequestSpan::fromGlobals();
         }
         // Laravel and Symfony (capture_uncaught off) turn PHP warnings into logs and exceptions
         // themselves; Zharp receives those.
@@ -448,12 +468,91 @@ final class Zharp
         if (str_starts_with($error['message'], 'Uncaught ')) {
             return;
         }
+        self::$request?->fail($error['message']);
         self::emit(21, 'fatal', 'FatalError: ' . $error['message'], [
             'exception.type' => 'FatalError',
             'exception.message' => $error['message'],
             'exception.stacktrace' => "FatalError: {$error['message']}\n#0 {$error['file']}({$error['line']})",
             'zharp.handled' => 'false',
         ]);
+    }
+
+    /**
+     * What PHP does with an uncaught exception and no handler: log it, show it where errors are
+     * displayed, answer a web request with 500, and exit with status 255.
+     */
+    private static function uncaughtAsPhpWould(Throwable $e): void
+    {
+        $text = 'Uncaught ' . $e . "\n  thrown in " . $e->getFile() . ' on line ' . $e->getLine();
+        error_log('PHP Fatal error:  ' . $text);
+        if (Config::webSapi() && !headers_sent()) {
+            http_response_code(500);
+        }
+        $display = strtolower((string) ini_get('display_errors'));
+        if (Config::webSapi() && in_array($display, ['1', 'on', 'true', 'yes', 'stdout'], true)) {
+            echo ini_get('html_errors')
+                ? "<br />\n<b>Fatal error</b>:  " . htmlspecialchars($text) . "<br />\n"
+                : "\nFatal error: " . $text . "\n";
+        }
+        exit(255);
+    }
+
+    // ── Plain PHP requests ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * The web request plain PHP is serving, traced since init() (trace_request); null in the CLI,
+     * with a framework integration, or once it has ended.
+     */
+    public static function request(): ?RequestSpan
+    {
+        $request = self::$request;
+
+        return $request !== null && !$request->hasEnded() ? $request : null;
+    }
+
+    /**
+     * Name the request plain PHP is serving by its route ("/orders/{id}"), once your router knows
+     * it: its span becomes "GET /orders/{id}". Without it the span is named by the script
+     * ("GET /index.php").
+     */
+    public static function setRoute(string $route): void
+    {
+        self::request()?->setRoute($route);
+    }
+
+    /** Ends the plain PHP request with its status, and under PHP-FPM sends the response first. */
+    private static function finishRequest(): void
+    {
+        $request = self::$request;
+        if ($request === null || $request->hasEnded()) {
+            return;
+        }
+        try {
+            $status = http_response_code();
+            $status = is_int($status) && $status > 0 ? $status : 200;
+            if ($request->hasFailed() && $status < 500) {
+                $status = 500;
+            }
+            $request->end($status, null, self::responseHeaders());
+            if (PHP_SAPI === 'fpm-fcgi' && function_exists('fastcgi_finish_request')) {
+                fastcgi_finish_request();
+            }
+        } catch (Throwable) {
+        }
+    }
+
+    /** @return array<string, list<string>> */
+    private static function responseHeaders(): array
+    {
+        $headers = [];
+        foreach (headers_list() as $line) {
+            $parts = explode(':', $line, 2);
+            if (count($parts) === 2) {
+                $headers[strtolower(trim($parts[0]))][] = trim($parts[1]);
+            }
+        }
+
+        return $headers;
     }
 
     // ── Context ─────────────────────────────────────────────────────────────────────────────────
@@ -611,6 +710,7 @@ final class Zharp
         self::shutdown();
         OutputCapture::reset();
         SentLines::reset();
+        self::$request = null;
         self::$user = null;
         self::$tags = [];
         self::$reported = null;

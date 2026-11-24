@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Plain PHP: `Zharp::init()` in a web request traces the request PHP is serving, from `$_SERVER`
+  (`trace_request`, `ZHARP_TRACE_REQUEST`): named by its script, or by route with
+  `Zharp::setRoute()`; it continues the caller's trace and ends with the response's status, after the
+  app's own shutdown functions (and `fastcgi_finish_request()` under PHP-FPM).
+- An uncaught exception with no other handler answers the request with 500 and is shown where PHP
+  shows errors, as without Zharp (it was a blank 200). A fatal error fails the request too.
+- `RequestSpan::fromGlobals()`, `Zharp::request()`.
+
 ## v0.5.0 (`zharp/zharp`) — 2026-11-21
 
 - Request and response headers on the request's span (`capture_headers`, `ZHARP_CAPTURE_HEADERS`); secrets are sent as `[Filtered]`.
